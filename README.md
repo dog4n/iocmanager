@@ -4,7 +4,7 @@ FortiGate ve diğer güvenlik cihazlarına tanımlanan **IP / Hash / Domain / UR
 tehdit listelerini** (allowlist ve blacklist) merkezi olarak yönetmek için
 geliştirilmiş, kurum içi (self-hosted) bir web portalı.
 
-DS Tech tarafından geliştirilmiştir.
+Geliştirici: DS Tech.
 
 ---
 
