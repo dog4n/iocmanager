@@ -1,0 +1,4 @@
+# Linux production bagimliliklari (systemd + gunicorn)
+flask==3.0.3
+waitress==3.0.0
+gunicorn==22.0.0

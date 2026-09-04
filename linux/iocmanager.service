@@ -1,0 +1,32 @@
+[Unit]
+Description=IoCManager - IoC Feed Yonetim Portali
+After=network.target
+
+[Service]
+Type=simple
+User=iocmanager
+Group=iocmanager
+WorkingDirectory=/opt/iocmanager
+Environment="PATH=/opt/iocmanager/venv/bin"
+Environment="IOCMANAGER_FEED_DIR=/opt/threatfeed/public"
+Environment="IOCMANAGER_DB=/opt/iocmanager/data/iocmanager.db"
+EnvironmentFile=-/opt/iocmanager/.env
+ExecStart=/opt/iocmanager/venv/bin/gunicorn \
+    --workers 2 \
+    --bind 0.0.0.0:5000 \
+    --timeout 60 \
+    --access-logfile /opt/iocmanager/logs/access.log \
+    --error-logfile /opt/iocmanager/logs/error.log \
+    app:app
+Restart=on-failure
+RestartSec=5
+
+# Guvenlik sertlestirme
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/iocmanager/data /opt/iocmanager/logs /opt/threatfeed/public
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

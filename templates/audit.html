@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Audit Log — IoCManager{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Audit Log</h1>
+  <p>Tum islem kayitlari</p>
+</div>
+
+<form method="GET" action="/audit">
+  <div class="toolbar">
+    <div class="form-group">
+      <label>Feed</label>
+      <select name="feed" onchange="this.form.submit()">
+        <option value="">Tumu</option>
+        {% for f in feeds %}
+        <option value="{{ f }}" {{ 'selected' if feed_filter == f }}>{{ f }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Islem</label>
+      <select name="action" onchange="this.form.submit()">
+        <option value="">Tumu</option>
+        <option value="ADD"        {{ 'selected' if action_filter == 'ADD' }}>Ekle</option>
+        <option value="REMOVE"     {{ 'selected' if action_filter == 'REMOVE' }}>Sil</option>
+        <option value="LOGIN"      {{ 'selected' if action_filter == 'LOGIN' }}>Giris</option>
+        <option value="LOGIN_FAIL" {{ 'selected' if action_filter == 'LOGIN_FAIL' }}>Basarisiz Giris</option>
+      </select>
+    </div>
+    <div>
+      <a href="/audit" class="btn btn-secondary">Sifirla</a>
+    </div>
+  </div>
+</form>
+
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">
+      Islem Gecmisi
+      <span class="badge">{{ total }} toplam kayit</span>
+    </div>
+  </div>
+  <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Tarih / Saat</th>
+          <th>Kullanici</th>
+          <th>Islem</th>
+          <th>Feed</th>
+          <th>IP / Hash</th>
+          <th>Not</th>
+          <th>Istemci IP</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in logs %}
+        <tr>
+          <td style="color:var(--text-muted);">{{ log.id }}</td>
+          <td class="mono" style="color:var(--text-muted); white-space:nowrap;">{{ log.timestamp }}</td>
+          <td style="font-weight:600; color:var(--text-head);">{{ log.username }}</td>
+          <td>
+            {% if log.action == 'ADD' %}
+            <span class="tag tag-add">+ EKLE</span>
+            {% elif log.action == 'REMOVE' %}
+            <span class="tag tag-remove">- SIL</span>
+            {% elif log.action == 'LOGIN' %}
+            <span class="tag" style="background:rgba(31,111,235,.15); color:#58a6ff; border:1px solid #1f6feb;">GIRIS</span>
+            {% elif log.action == 'LOGIN_FAIL' %}
+            <span class="tag" style="background:rgba(218,54,51,.2); color:#ff7b72; border:1px solid #da3633;">BASARISIZ</span>
+            {% elif log.action == 'LOCKOUT' %}
+            <span class="tag" style="background:rgba(158,106,3,.3); color:#d29922; border:1px solid #9e6a03;">KILITLI</span>
+            {% elif log.action == 'ENRICH' %}
+            <span class="tag" style="background:rgba(139,73,234,.15); color:#bc8cff; border:1px solid #8b49ea;">SORGU</span>
+            {% else %}
+            <span class="tag" style="background:rgba(255,255,255,.06); color:var(--text-muted);">{{ log.action }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if log.feed == '-' or log.feed == '' %}
+            <span style="color:var(--text-muted);">—</span>
+            {% elif 'allow' in log.feed %}
+            <span class="tag tag-allow">allow</span>
+            {% elif 'hash' in log.feed %}
+            <span class="tag" style="background:rgba(158,106,3,.2); color:#d29922; border:1px solid #9e6a03;">hash</span>
+            {% elif 'domain' in log.feed %}
+            <span class="tag" style="background:rgba(31,111,235,.15); color:#58a6ff; border:1px solid #1f6feb;">domain</span>
+            {% elif 'url' in log.feed %}
+            <span class="tag" style="background:rgba(139,73,234,.15); color:#bc8cff; border:1px solid #8b49ea;">url</span>
+            {% else %}
+            <span class="tag tag-block">block</span>
+            {% endif %}
+          </td>
+          <td class="mono" style="color:var(--text-head); font-size:11px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="{{ log.ip_address }}">
+            {{ log.ip_address or '—' }}
+          </td>
+          <td style="color:var(--text-muted); max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+              title="{{ log.note }}">{{ log.note or '—' }}</td>
+          <td class="mono" style="color:var(--text-muted);">{{ log.client_ip }}</td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="8" style="text-align:center; color:var(--text-muted); padding:32px;">
+            Kayit bulunamadi
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% set total_pages = (total // per_page) + (1 if total % per_page else 0) %}
+{% if total_pages > 1 %}
+<div class="pagination">
+  {% if page > 1 %}
+  <a href="?page={{ page-1 }}&feed={{ feed_filter }}&action={{ action_filter }}">Onceki</a>
+  {% endif %}
+  {% for p in range(1, total_pages+1) %}
+    {% if p == page %}
+    <span class="current">{{ p }}</span>
+    {% elif p <= 3 or p >= total_pages-2 or (p >= page-2 and p <= page+2) %}
+    <a href="?page={{ p }}&feed={{ feed_filter }}&action={{ action_filter }}">{{ p }}</a>
+    {% elif p == 4 or p == total_pages-3 %}
+    <span style="border:none; color:var(--text-muted);">...</span>
+    {% endif %}
+  {% endfor %}
+  {% if page < total_pages %}
+  <a href="?page={{ page+1 }}&feed={{ feed_filter }}&action={{ action_filter }}">Sonraki</a>
+  {% endif %}
+</div>
+{% endif %}
+
+{% endblock %}

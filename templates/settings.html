@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}SIEM Ayarlari — IoCManager{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>SIEM Ayarlari</h1>
+  <p>Syslog / CEF forwarding yapilandirmasi</p>
+</div>
+
+{% if test_result %}
+<div class="flashes">
+  <div class="flash {{ test_result[0] }}">Baglanti Testi: {{ test_result[1] }}</div>
+</div>
+{% endif %}
+
+<div class="grid-2" style="gap:24px; align-items:start;">
+  <div class="card">
+    <div class="card-header"><div class="card-title">SIEM / Syslog Yapilandirmasi</div></div>
+    <div class="card-body">
+      <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="save">
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+            <input type="checkbox" name="siem_enabled" value="1" {{ 'checked' if cfg.siem_enabled == '1' }} style="width:auto; margin:0;">
+            SIEM Forwarding Aktif
+          </label>
+        </div>
+        <div class="form-group">
+          <label>SIEM Host (IP veya hostname)</label>
+          <input type="text" name="siem_host" value="{{ cfg.siem_host }}" placeholder="192.168.1.100">
+        </div>
+        <div class="form-group">
+          <label>Port</label>
+          <input type="text" name="siem_port" value="{{ cfg.siem_port }}" placeholder="514">
+        </div>
+        <div class="form-group">
+          <label>Protokol</label>
+          <select name="siem_protocol">
+            <option value="UDP" {{ 'selected' if cfg.siem_protocol == 'UDP' }}>UDP (varsayilan)</option>
+            <option value="TCP" {{ 'selected' if cfg.siem_protocol == 'TCP' }}>TCP</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+            <input type="checkbox" name="siem_cef_file" value="1" {{ 'checked' if cfg.siem_cef_file == '1' }} style="width:auto; margin:0;">
+            CEF Log Dosyasina Yaz (SIEM kapali olsa bile)
+          </label>
+          <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">{{ log_path }}</div>
+        </div>
+        <button type="submit" class="btn btn-primary">Kaydet</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div class="card-title">SIEM Baglanti Testi</div></div>
+    <div class="card-body">
+      <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">
+        SIEM'e test CEF paketi gonderin. Kaydetmeden once test edebilirsiniz.
+      </p>
+      <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="test">
+        <div class="form-group"><label>Host</label>
+          <input type="text" name="siem_host" value="{{ cfg.siem_host }}" placeholder="192.168.1.100"></div>
+        <div class="form-group"><label>Port</label>
+          <input type="text" name="siem_port" value="{{ cfg.siem_port }}" placeholder="514"></div>
+        <div class="form-group"><label>Protokol</label>
+          <select name="siem_protocol">
+            <option value="UDP" {{ 'selected' if cfg.siem_protocol == 'UDP' }}>UDP</option>
+            <option value="TCP" {{ 'selected' if cfg.siem_protocol == 'TCP' }}>TCP</option>
+          </select></div>
+        <button type="submit" class="btn btn-secondary">Test Gonder</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

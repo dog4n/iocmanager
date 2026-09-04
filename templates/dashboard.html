@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — IoCManager{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Dashboard</h1>
+  <p>Tehdit gostergelerini tek yerden ekleyin — tip otomatik algilanir</p>
+</div>
+
+<!-- Stat cards -->
+<div class="stat-grid">
+  <div class="stat-card stat-accent-green">
+    <div class="stat-label">Allowlist IP</div>
+    <div class="stat-value">{{ feeds['allowlist-ip']|length }}</div>
+  </div>
+  <div class="stat-card stat-accent-red">
+    <div class="stat-label">Blacklist IP</div>
+    <div class="stat-value">{{ feeds['blacklist-ip']|length }}</div>
+  </div>
+  <div class="stat-card stat-accent-amber">
+    <div class="stat-label">Blacklist Hash</div>
+    <div class="stat-value">{{ feeds['blacklist-hash']|length }}</div>
+  </div>
+  <div class="stat-card stat-accent-blue">
+    <div class="stat-label">Domain <span style="opacity:.6">a/b</span></div>
+    <div class="stat-value">{{ feeds['allowlist-domain']|length }}<span class="stat-sep">/</span>{{ feeds['blacklist-domain']|length }}</div>
+  </div>
+  <div class="stat-card stat-accent-purple">
+    <div class="stat-label">URL <span style="opacity:.6">a/b</span></div>
+    <div class="stat-value">{{ feeds['allowlist-url']|length }}<span class="stat-sep">/</span>{{ feeds['blacklist-url']|length }}</div>
+  </div>
+</div>
+
+<!-- Smart Add -->
+<div class="smart-card">
+  <div class="smart-head">
+    <div class="smart-title">
+      <span class="smart-icon">+</span>
+      Gosterge Ekle
+    </div>
+    <div class="smart-hint">IP · Domain · URL · Hash — hepsini tek kutuya yapistir</div>
+  </div>
+
+  <form method="POST" action="/smart-add" id="smartForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <!-- Direction toggle -->
+    <div class="dir-toggle">
+      <input type="radio" name="direction" id="dir-block" value="blacklist" checked>
+      <label for="dir-block" class="dir-block">Blacklist</label>
+      <input type="radio" name="direction" id="dir-allow" value="allowlist">
+      <label for="dir-allow" class="dir-allow">Allowlist</label>
+      <span class="dir-note">Hash her zaman blacklist'e gider</span>
+    </div>
+
+    <div class="smart-body">
+      <div class="smart-input-col">
+        <label>Gostergeler <span class="muted">(her satir bir kayit)</span></label>
+        <textarea name="indicators" id="indicators" rows="7"
+          placeholder="8.8.8.8&#10;evil.com&#10;*.phishing.net&#10;http://bad.com/malware.exe&#10;d41d8cd98f00b204e9800998ecf8427e"></textarea>
+        <div class="detect-bar" id="detectBar">
+          <span class="detect-chip" data-type="ip">IP <b>0</b></span>
+          <span class="detect-chip" data-type="domain">Domain <b>0</b></span>
+          <span class="detect-chip" data-type="url">URL <b>0</b></span>
+          <span class="detect-chip" data-type="hash">Hash <b>0</b></span>
+          <span class="detect-chip detect-unknown" data-type="unknown">Taninmayan <b>0</b></span>
+        </div>
+      </div>
+      <div class="smart-note-col">
+        <label>Not / Gerekce</label>
+        <textarea name="note" rows="7" placeholder="Ornek: INC-12345 — phishing kampanyasi&#10;Kaynak, olay no, aciklama"></textarea>
+      </div>
+    </div>
+
+    <div class="smart-foot">
+      <button type="submit" class="btn btn-primary btn-lg">Ekle ve Dagit</button>
+      <span class="muted" style="margin-left:14px;">Private/ozel IP'ler otomatik engellenir · Tip otomatik algilanir</span>
+    </div>
+  </form>
+</div>
+
+<!-- Feed lists -->
+<div class="feed-grid">
+  {% set feedmeta = [
+    ('allowlist-ip','Allowlist IP','allow'),
+    ('blacklist-ip','Blacklist IP','block'),
+    ('blacklist-domain','Blacklist Domain','block'),
+    ('blacklist-url','Blacklist URL','block'),
+    ('allowlist-domain','Allowlist Domain','allow'),
+    ('allowlist-url','Allowlist URL','allow')
+  ] %}
+  {% for feedname, title, cls in feedmeta %}
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">{{ title }} <span class="badge {{ cls }}">{{ feeds[feedname]|length }}</span></div>
+    </div>
+    <div class="card-body" style="padding:10px 16px;">
+      {% if feeds[feedname] %}
+      <ul class="ip-list">
+        {% for item in feeds[feedname]|sort %}
+        <li class="ip-item">
+          <span class="ip-addr">{{ item }}</span>
+          <form method="POST" action="/remove" style="display:inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="feed" value="{{ feedname }}">
+            <input type="hidden" name="ip" value="{{ item }}">
+            <input type="hidden" name="note" value="Dashboard silindi">
+            <button type="submit" class="btn btn-danger" onclick="return confirm('Silinsin mi?')">Sil</button>
+          </form>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}<div class="empty-state">Bos</div>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Hash list (full width) -->
+<div class="card" style="margin-top:16px;">
+  <div class="card-header">
+    <div class="card-title">Blacklist Hash
+      <span class="badge" style="background:rgba(158,106,3,.2); border-color:#9e6a03; color:#d29922;">{{ feeds['blacklist-hash']|length }}</span>
+    </div>
+  </div>
+  <div style="overflow-x:auto;">
+    {% if feeds['blacklist-hash'] %}
+    <table>
+      <thead><tr><th>Tip</th><th>Hash</th><th>Islem</th></tr></thead>
+      <tbody>
+        {% for h in feeds['blacklist-hash']|sort %}
+        <tr>
+          <td>
+            {% set hlen = h|length %}
+            {% if hlen == 32 %}<span class="tag" style="background:rgba(31,111,235,.15); color:#58a6ff; border:1px solid #1f6feb;">MD5</span>
+            {% elif hlen == 40 %}<span class="tag" style="background:rgba(139,73,234,.15); color:#bc8cff; border:1px solid #8b49ea;">SHA1</span>
+            {% elif hlen == 64 %}<span class="tag" style="background:rgba(158,106,3,.2); color:#d29922; border:1px solid #9e6a03;">SHA256</span>
+            {% elif hlen == 128 %}<span class="tag" style="background:rgba(35,134,54,.12); color:#56d364; border:1px solid #238636;">SHA512</span>
+            {% else %}<span class="tag">?</span>{% endif %}
+          </td>
+          <td class="mono" style="color:var(--text-head); font-size:11px; word-break:break-all;">{{ h }}</td>
+          <td>
+            <form method="POST" action="/remove" style="display:inline;">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="feed" value="blacklist-hash">
+              <input type="hidden" name="ip" value="{{ h }}">
+              <input type="hidden" name="note" value="Dashboard silindi">
+              <button type="submit" class="btn btn-danger" onclick="return confirm('Silinsin mi?')">Sil</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty-state" style="padding:28px;">Bos</div>{% endif %}
+  </div>
+</div>
+
+<script>
+(function(){
+  const ta = document.getElementById('indicators');
+  const bar = document.getElementById('detectBar');
+  const token = "{{ csrf_token }}";
+  let timer = null;
+
+  function update(counts){
+    for (const chip of bar.querySelectorAll('.detect-chip')){
+      const t = chip.dataset.type;
+      const n = counts[t] || 0;
+      chip.querySelector('b').textContent = n;
+      chip.classList.toggle('active', n > 0);
+    }
+  }
+
+  function detect(){
+    const body = new URLSearchParams();
+    body.append('indicators', ta.value);
+    fetch('/detect', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body})
+      .then(r => r.json()).then(update).catch(()=>{});
+  }
+
+  ta.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(detect, 300);
+  });
+})();
+</script>
+
+{% endblock %}

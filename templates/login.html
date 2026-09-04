@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<title>IoCManager — Giriş</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --accent: #e36209; --text: #c9d1d9; --text-muted: #8b949e;
+    --text-head: #f0f6fc; --danger: #da3633;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, 'Segoe UI', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .login-wrap {
+    width: 360px;
+  }
+  .login-header {
+    text-align: center;
+    margin-bottom: 32px;
+  }
+  .login-icon {
+    width: 52px; height: 52px;
+    background: rgba(227,98,9,.15);
+    border: 1px solid rgba(227,98,9,.3);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    margin: 0 auto 16px;
+  }
+  .login-header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-head);
+    margin-bottom: 6px;
+  }
+  .login-header p {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .login-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+  }
+  .form-group { margin-bottom: 16px; }
+  label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+  input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text-head);
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: border-color .15s;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  .btn-login {
+    width: 100%;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 11px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 8px;
+    transition: filter .15s;
+  }
+  .btn-login:hover { filter: brightness(1.1); }
+  .error-msg {
+    background: rgba(218,54,51,.12);
+    border: 1px solid rgba(218,54,51,.3);
+    border-radius: 6px;
+    color: #ff7b72;
+    padding: 10px 12px;
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+  .login-footer {
+    text-align: center;
+    margin-top: 20px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .legal-banner {
+    background: rgba(227,98,9,.08);
+    border: 1px solid rgba(227,98,9,.25);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 20px;
+    font-size: 11px;
+    color: #c9a06a;
+    line-height: 1.6;
+    text-align: justify;
+  }
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-header">
+    <div class="login-icon">🛡</div>
+    <h1>IoCManager</h1>
+    <p>IP listelerini yönetmek için giriş yapın</p>
+  </div>
+  <div class="legal-banner">
+    THIS IS A RESTRICTED INTERNAL SYSTEM. AVAILABLE TO AUTHORIZED
+    PERSONS ONLY. OTHERWISE, PERSONS WHO PROVIDE UNAUTHORIZED ACCESS SHALL BE
+    CONSIDERED TO ACCEPT LEGAL SANCTIONS. BY CONTINUING TO USE THIS SYSTEM, YOU
+    ACKNOWLEDGE THAT YOU KNOW AND AGREE TO THE TERMS AND CONDITIONS OF USE.
+  </div>
+  <div class="login-card">
+    {% if error %}
+    <div class="error-msg">{{ error }}</div>
+    {% endif %}
+    <form method="POST">
+      <div class="form-group">
+        <label for="username">Kullanıcı Adı</label>
+        <input type="text" id="username" name="username" required autofocus
+               placeholder="kullanıcı adı">
+      </div>
+      <div class="form-group">
+        <label for="password">Şifre</label>
+        <input type="password" id="password" name="password" required
+               placeholder="••••••••">
+      </div>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn-login">Giriş Yap →</button>
+    </form>
+  </div>
+  <div class="login-footer">
+    Internal Security Tool · Yetkisiz erişim yasaktır<br>
+    <span style="opacity:.7;">IoCManager v1.6.10 &middot; <span style="color:#e36209; font-weight:600;">DS Tech</span> tarafından geliştirilmiştir</span>
+  </div>
+</div>
+</body>
+</html>

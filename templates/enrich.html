@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Threat Intel Sorgu — IoCManager{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Threat Intel Sorgu</h1>
+  <p>IP, domain, URL veya hash'i tehdit istihbarat kaynaklarinda sorgulayin</p>
+</div>
+
+<div style="display:flex; gap:8px; margin-bottom:20px; flex-wrap:wrap;">
+  {% for s in active_sources %}
+  {% if s.active %}
+  <span class="tag" style="background:rgba(35,134,54,.12); color:#56d364; border:1px solid #238636; padding:4px 10px;">&#9679; {{ s.name }}</span>
+  {% else %}
+  <span class="tag" style="background:rgba(255,255,255,.04); color:var(--text-muted); border:1px solid var(--border); padding:4px 10px;">&#9675; {{ s.name }} (API yok)</span>
+  {% endif %}
+  {% endfor %}
+</div>
+
+<div class="card" style="margin-bottom:24px;">
+  <div class="card-body">
+    <form method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div style="display:flex; gap:12px; align-items:end;">
+        <div class="form-group" style="margin:0; flex:1;">
+          <label>Indicator (IP / Domain / URL / Hash)</label>
+          <input type="text" name="indicator" value="{{ indicator }}" required
+                 placeholder="8.8.8.8  veya  evil.com  veya  d41d8cd9..." autofocus>
+        </div>
+        <button type="submit" class="btn btn-primary">Sorgula</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% if result is not none %}
+<div class="page-header" style="margin-bottom:16px;">
+  <h1 style="font-size:16px;">Sonuclar
+    <span class="badge" style="margin-left:8px;">{{ itype }}</span>
+    <span class="mono" style="font-size:13px; color:var(--text-muted);">{{ indicator }}</span>
+  </h1>
+</div>
+
+{% if result|length == 0 %}
+<div class="card"><div class="card-body">
+  <div class="empty-state">Aktif kaynak yok veya bu tur icin sonuc alinamadi. API anahtarlarini Entegrasyonlar sayfasindan girin.</div>
+</div></div>
+{% endif %}
+
+{% for r in result %}
+<div class="card" style="margin-bottom:14px;">
+  <div class="card-header">
+    <div class="card-title">
+      {{ r.source }}
+      {% if r.verdict == 'malicious' or r.verdict == 'listed' %}
+      <span class="tag tag-block">ZARARLI</span>
+      {% elif r.verdict == 'clean' %}
+      <span class="tag tag-allow">TEMIZ</span>
+      {% elif r.verdict == 'suspicious' %}
+      <span class="tag" style="background:rgba(158,106,3,.2); color:#d29922; border:1px solid #9e6a03;">SUPHELI</span>
+      {% elif r.verdict == 'found' %}
+      <span class="tag" style="background:rgba(31,111,235,.15); color:#58a6ff; border:1px solid #1f6feb;">KAYIT VAR</span>
+      {% elif r.verdict == 'no_data' %}
+      <span class="tag" style="background:rgba(255,255,255,.06); color:var(--text-muted);">VERI YOK</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="card-body">
+    {% if r.error %}
+    <div style="color:#ff7b72; font-size:13px;">Hata: {{ r.error }}</div>
+    {% else %}
+    <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:12px;">
+      {% if r.source == 'VirusTotal' %}
+      <div><div class="stat-label">Zararli</div><div style="color:#ff7b72; font-size:20px; font-weight:700;">{{ r.malicious }}/{{ r.total }}</div></div>
+      <div><div class="stat-label">Supheli</div><div style="font-size:20px;">{{ r.suspicious }}</div></div>
+      <div><div class="stat-label">Temiz</div><div style="color:#56d364; font-size:20px;">{{ r.harmless }}</div></div>
+      {% if r.reputation is not none %}<div><div class="stat-label">Reputation</div><div style="color:{{ '#ff7b72' if r.reputation < 0 else '#56d364' }}; font-size:18px;">{{ r.reputation }}</div></div>{% endif %}
+      {% if r.registrar %}<div><div class="stat-label">Registrar</div><div style="font-size:13px;">{{ r.registrar }}</div></div>{% endif %}
+      {% if r.created %}<div><div class="stat-label">Olusturma</div><div style="font-size:13px;">{{ r.created }}</div></div>{% endif %}
+      {% if r.title %}<div style="grid-column:1/-1;"><div class="stat-label">Sayfa Basligi</div><div style="font-size:13px;">{{ r.title }}</div></div>{% endif %}
+      {% if r.final_url %}<div style="grid-column:1/-1;"><div class="stat-label">Final URL</div><div class="mono" style="font-size:12px; word-break:break-all;">{{ r.final_url }}</div></div>{% endif %}
+      {% if r.categories %}<div style="grid-column:1/-1;"><div class="stat-label">Kategoriler</div><div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">{% for cat in r.categories %}<span class="tag" style="background:rgba(255,255,255,.06); color:var(--text);">{{ cat }}</span>{% endfor %}</div></div>{% endif %}
+      {% if r.note %}<div style="grid-column:1/-1;"><div class="stat-label">Not</div><div style="font-size:13px; color:var(--text-muted);">{{ r.note }}</div></div>{% endif %}
+
+      {% elif r.source == 'AbuseIPDB' %}
+      <div><div class="stat-label">Abuse Skoru</div><div style="color:{{ '#ff7b72' if r.score >= 50 else '#56d364' }}; font-size:20px; font-weight:700;">{{ r.score }}%</div></div>
+      <div><div class="stat-label">Rapor</div><div style="font-size:20px;">{{ r.reports }}</div></div>
+      <div><div class="stat-label">Ulke</div><div style="font-size:15px;">{{ r.country }}</div></div>
+      <div><div class="stat-label">ISP</div><div style="font-size:13px;">{{ r.isp }}</div></div>
+      <div><div class="stat-label">Kullanim</div><div style="font-size:13px;">{{ r.usage }}</div></div>
+
+      {% elif r.source == 'URLScan' %}
+      {% if r.score is defined and r.score %}<div><div class="stat-label">URLScan Skoru</div><div style="color:{{ '#ff7b72' if r.score else '#56d364' }}; font-size:20px; font-weight:700;">{{ r.score }}</div></div>{% endif %}
+      {% if r.ip and r.ip != '-' %}<div><div class="stat-label">IP</div><div class="mono" style="font-size:14px;">{{ r.ip }}</div></div>{% endif %}
+      {% if r.country and r.country != '-' %}<div><div class="stat-label">Ulke</div><div>{{ r.country }}</div></div>{% endif %}
+      {% if r.server and r.server != '-' %}<div><div class="stat-label">Server</div><div style="font-size:13px;">{{ r.server }}</div></div>{% endif %}
+      {% if r.asnname and r.asnname != '-' %}<div><div class="stat-label">ASN / ISP</div><div style="font-size:13px;">{{ r.asnname }}</div></div>{% endif %}
+      {% if r.tls_issuer and r.tls_issuer != '-' %}<div><div class="stat-label">TLS Issuer</div><div style="font-size:12px;">{{ r.tls_issuer }}</div></div>{% endif %}
+      {% if r.brands %}<div style="grid-column:1/-1;"><div class="stat-label" style="color:#ff7b72;">Taklit Edilen Marka (Phishing)</div><div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">{% for b in r.brands %}<span class="tag tag-block">{{ b }}</span>{% endfor %}</div></div>{% endif %}
+      {% if r.categories %}<div style="grid-column:1/-1;"><div class="stat-label">Kategoriler</div><div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">{% for cat in r.categories %}<span class="tag" style="background:rgba(158,106,3,.15); color:#d29922; border:1px solid #9e6a03;">{{ cat }}</span>{% endfor %}</div></div>{% endif %}
+      {% if r.tags %}<div style="grid-column:1/-1;"><div class="stat-label">Etiketler</div><div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">{% for t in r.tags %}<span class="tag" style="background:rgba(255,255,255,.06); color:var(--text-muted);">{{ t }}</span>{% endfor %}</div></div>{% endif %}
+      {% if r.related_ips %}<div style="grid-column:1/-1;"><div class="stat-label">Iliskili IP'ler ({{ r.related_ips|length }})</div><div class="mono" style="font-size:11px; color:var(--text-muted); margin-top:4px; line-height:1.6;">{{ r.related_ips|join(', ') }}</div></div>{% endif %}
+      {% if r.related_domains %}<div style="grid-column:1/-1;"><div class="stat-label">Iliskili Domainler ({{ r.related_domains|length }})</div><div class="mono" style="font-size:11px; color:var(--text-muted); margin-top:4px; line-height:1.6;">{{ r.related_domains|join(', ') }}</div></div>{% endif %}
+      {% if r.note %}<div style="grid-column:1/-1;"><div class="stat-label">Not</div><div style="font-size:13px; color:var(--text-muted);">{{ r.note }}</div></div>{% endif %}
+
+      {% elif r.source == 'Shodan' %}
+      <div><div class="stat-label">Acik Portlar</div><div class="mono" style="font-size:14px;">{{ r.ports|join(', ') if r.ports else '-' }}</div></div>
+      <div><div class="stat-label">Org</div><div style="font-size:13px;">{{ r.org }}</div></div>
+      <div><div class="stat-label">OS</div><div>{{ r.os }}</div></div>
+      <div><div class="stat-label">Ulke</div><div>{{ r.country }}</div></div>
+      {% if r.note %}<div><div class="stat-label">Not</div><div>{{ r.note }}</div></div>{% endif %}
+
+      {% elif r.source == 'MXToolbox' %}
+      <div><div class="stat-label">Blacklist Sayisi</div><div style="color:{{ '#ff7b72' if r.blacklists else '#56d364' }}; font-size:20px; font-weight:700;">{{ r.blacklists }}</div></div>
+      {% if r.details %}<div style="grid-column:1/-1;"><div class="stat-label">Listeler</div><div style="font-size:13px;">{{ r.details|join(', ') }}</div></div>{% endif %}
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+
+{% endblock %}

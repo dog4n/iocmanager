@@ -1,0 +1,42 @@
+# IoCManager - .gitignore
+
+# Veritabani ve calisma zamani verileri (kullanicilar, audit log, API anahtarlari)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Loglar
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Windows kurulum kalintilari (kurulum.ps1 tarafindan indirilir, repoya girmemeli)
+windows/python/
+windows/nssm/
+*.pem
+corp-ca.pem
+windows-root-cas.pem
+umbrella-chain.pem
+
+# Ortam / sirlar
+.env
+*.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Test/gecici dosyalar
+/tmp/
+*.tmp

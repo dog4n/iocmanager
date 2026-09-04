@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block title %}Entegrasyonlar — IoCManager{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Entegrasyonlar</h1>
+  <p>Blacklist kayitlarini dis sistemlere otomatik yansitan entegrasyonlar</p>
+</div>
+
+<!-- Threat Intel API -->
+<div class="card" style="margin-bottom:20px;">
+  <div class="card-header"><div class="card-title">Threat Intel API Anahtarlari</div></div>
+  <div class="card-body">
+    <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
+      Anahtar girilen kaynaklar Sorgu sayfasinda aktif olur. Bos birakilan kaynaklar otomatik atlanir.
+      VirusTotal, AbuseIPDB ve URLScan ucretsiz tier sunar. Shodan ve MXToolbox genelde ucretlidir.
+    </p>
+    <form method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="save_api">
+      <div class="grid-2" style="gap:16px;">
+        <div class="form-group"><label>VirusTotal API Key</label>
+          <input type="text" name="api_virustotal" value="{{ cfg.api_virustotal }}" placeholder="bos = devre disi"></div>
+        <div class="form-group"><label>AbuseIPDB API Key</label>
+          <input type="text" name="api_abuseipdb" value="{{ cfg.api_abuseipdb }}" placeholder="bos = devre disi"></div>
+        <div class="form-group"><label>URLScan API Key</label>
+          <input type="text" name="api_urlscan" value="{{ cfg.api_urlscan }}" placeholder="bos = devre disi"></div>
+        <div class="form-group"><label>Shodan API Key</label>
+          <input type="text" name="api_shodan" value="{{ cfg.api_shodan }}" placeholder="bos = devre disi"></div>
+        <div class="form-group"><label>MXToolbox API Key</label>
+          <input type="text" name="api_mxtoolbox" value="{{ cfg.api_mxtoolbox }}" placeholder="bos = devre disi"></div>
+        <div class="form-group" style="display:flex; align-items:center;">
+          <label style="display:flex; align-items:center; gap:10px; cursor:pointer; margin-top:18px;">
+            <input type="checkbox" name="urlscan_live" value="1" {{ 'checked' if cfg.urlscan_live == '1' }} style="width:auto; margin:0;">
+            URLScan canli tarama (kayit yoksa yeni tarama baslat, ~30sn)
+          </label>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary">API Ayarlarini Kaydet</button>
+    </form>
+  </div>
+</div>
+
+<!-- Cisco Umbrella Management API -->
+<div class="card">
+  <div class="card-header"><div class="card-title">Cisco Umbrella Entegrasyonu</div></div>
+  <div class="card-body">
+    <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
+      blacklist-domain listesindeki domainler, IoCManager'in Umbrella'da otomatik olusturdugu
+      "IoCManager Blacklist" destination list'ine (block tipi) yazilir. Management API Key + Secret gereklidir.
+      Otomatik sync acikken her ekleme/silme aninda Umbrella'ya yansir.
+    </p>
+    <form method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="save_umbrella">
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+          <input type="checkbox" name="umbrella_enabled" value="1" {{ 'checked' if cfg.umbrella_enabled == '1' }} style="width:auto; margin:0;">
+          Umbrella Entegrasyonu Aktif
+        </label>
+      </div>
+      <div class="grid-2" style="gap:16px;">
+        <div class="form-group"><label>Management API Key</label>
+          <input type="text" name="umbrella_key" value="{{ cfg.umbrella_key }}" placeholder="API Key"></div>
+        <div class="form-group"><label>Management API Secret</label>
+          <input type="password" name="umbrella_secret" placeholder="{{ '******** (kayitli)' if cfg.umbrella_secret else 'API Secret' }}"></div>
+      </div>
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+          <input type="checkbox" name="umbrella_auto_sync" value="1" {{ 'checked' if cfg.umbrella_auto_sync == '1' }} style="width:auto; margin:0;">
+          Otomatik Sync (her blacklist-domain ekleme/silmede Umbrella'ya yansit)
+        </label>
+      </div>
+      {% if cfg.umbrella_list_id %}
+      <div style="font-size:11px; color:var(--text-muted); margin-bottom:12px;">
+        Aktif Destination List ID: <span class="mono">{{ cfg.umbrella_list_id }}</span>
+      </div>
+      {% endif %}
+      <button type="submit" class="btn btn-primary">Umbrella Ayarlarini Kaydet</button>
+    </form>
+
+    <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border); display:flex; gap:10px; align-items:center;">
+      <form method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="umbrella_test">
+        <button type="submit" class="btn btn-secondary">Baglanti Testi</button>
+      </form>
+      <form method="POST" style="display:inline;" onsubmit="return confirm('Tum blacklist domainler Umbrella listesine gonderilecek. Devam?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="umbrella_sync">
+        <button type="submit" class="btn btn-secondary">Umbrella'ya Senkronize Et</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Trend Micro TippingPoint SMS -->
+<div class="card" style="margin-top:20px;">
+  <div class="card-header"><div class="card-title">Trend Micro TippingPoint SMS Entegrasyonu</div></div>
+  <div class="card-body">
+    <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
+      blacklist-ip listesini TippingPoint SMS Reputation Database'ine ekler
+      (domain/URL desteklenmez, sadece IP). Tag kategorisi/degeri opsiyoneldir — bos birakilirsa kayit
+      etiketlenmeden eklenir (sadece IP/domain/URL). Doldurulursa, o tag'i referans alan bir
+      Reputation filtresi olusturup cihazlara dagitmaniz gerekir. Hash girisleri desteklenmez.
+    </p>
+    <form method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="save_tippingpoint">
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+          <input type="checkbox" name="tippingpoint_enabled" value="1" {{ 'checked' if cfg.tippingpoint_enabled == '1' }} style="width:auto; margin:0;">
+          TippingPoint SMS Entegrasyonu Aktif
+        </label>
+      </div>
+      <div class="grid-2" style="gap:16px;">
+        <div class="form-group"><label>SMS Sunucu Adresi (IP veya hostname)</label>
+          <input type="text" name="tippingpoint_server" value="{{ cfg.tippingpoint_server }}" placeholder="sms.ornek.local"></div>
+        <div class="form-group"><label>API Key</label>
+          <input type="password" name="tippingpoint_api_key" placeholder="{{ '******** (kayitli)' if cfg.tippingpoint_api_key else 'API Key' }}"></div>
+        <div class="form-group"><label>Tag Kategorisi <span style="color:var(--text-muted); font-weight:400;">(opsiyonel)</span></label>
+          <input type="text" name="tippingpoint_tag_category" value="{{ cfg.tippingpoint_tag_category }}" placeholder="bos = tagsiz ekle"></div>
+        <div class="form-group"><label>Tag Degeri <span style="color:var(--text-muted); font-weight:400;">(opsiyonel)</span></label>
+          <input type="text" name="tippingpoint_tag_value" value="{{ cfg.tippingpoint_tag_value }}" placeholder="bos = tagsiz ekle"></div>
+      </div>
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+          <input type="checkbox" name="tippingpoint_skip_ssl_verify" value="1" {{ 'checked' if cfg.tippingpoint_skip_ssl_verify == '1' }} style="width:auto; margin:0;">
+          SSL sertifika dogrulamasini atla
+        </label>
+        <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">
+          SMS yonetim arayuzu varsayilan olarak self-signed sertifika kullanir. Ozel sertifika
+          yuklemediyseniz bu kutuyu isaretleyin.
+        </div>
+      </div>
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+          <input type="checkbox" name="tippingpoint_auto_sync" value="1" {{ 'checked' if cfg.tippingpoint_auto_sync == '1' }} style="width:auto; margin:0;">
+          Otomatik Sync (her blacklist ip/domain/url ekleme-silmede SMS'e yansit)
+        </label>
+      </div>
+      <button type="submit" class="btn btn-primary">TippingPoint Ayarlarini Kaydet</button>
+    </form>
+
+    <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border); display:flex; gap:10px; align-items:center;">
+      <form method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="tippingpoint_test">
+        <button type="submit" class="btn btn-secondary">Baglanti Testi</button>
+      </form>
+      <form method="POST" style="display:inline;" onsubmit="return confirm('Tum blacklist IP/domain/URL kayitlari TippingPoint SMS\\'e gonderilecek. Devam?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="tippingpoint_sync">
+        <button type="submit" class="btn btn-secondary">TippingPoint'e Senkronize Et</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Sistem Izleme — IoCManager{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Sistem Izleme</h1>
+  <p>Servis durumu, dosya sagligi ve gecmise donuk log kayitlari</p>
+</div>
+
+<!-- Saglik kartlari -->
+<div class="grid-3" style="gap:16px; margin-bottom:20px;">
+
+  <div class="stat-card" style="border-left:3px solid {{ '#238636' if service_state == 'running' or service_state == 'active' else ('#da3633' if service_state in ['stopped','inactive','failed'] else '#9e6a03') }};">
+    <div class="stat-label">Servis Durumu</div>
+    <div class="stat-value" style="font-size:18px; color:{{ '#56d364' if service_state == 'running' or service_state == 'active' else ('#ff7b72' if service_state in ['stopped','inactive','failed'] else '#d29922') }};">
+      {% if service_state in ['running','active'] %}Calisiyor
+      {% elif service_state in ['stopped','inactive','failed'] %}Durdu
+      {% elif service_state == 'pending' %}Gecis halinde
+      {% else %}Bilinmiyor{% endif %}
+    </div>
+    <div class="stat-sub">raw: {{ service_state }}</div>
+  </div>
+
+  <div class="stat-card" style="border-left:3px solid #1f6feb;">
+    <div class="stat-label">Calisma Suresi (Uptime)</div>
+    <div class="stat-value" style="font-size:18px;">{{ uptime_str }}</div>
+    <div class="stat-sub">baslangic: {{ app_start_time }}</div>
+  </div>
+
+  <div class="stat-card" style="border-left:3px solid {{ '#238636' if db_ok else '#da3633' }};">
+    <div class="stat-label">Veritabani</div>
+    <div class="stat-value" style="font-size:18px; color:{{ '#56d364' if db_ok else '#ff7b72' }};">
+      {{ 'Erisilebilir' if db_ok else 'Erisim Hatasi' }}
+    </div>
+    <div class="stat-sub">{{ '%.1f'|format(db_size/1024) ~ ' KB' if db_size else '-' }}</div>
+  </div>
+
+</div>
+
+<!-- Entegrasyon durumu -->
+<div class="grid-2" style="gap:16px; margin-bottom:20px;">
+  <div class="stat-card">
+    <div class="stat-label">SIEM Forwarding</div>
+    <div class="stat-value" style="font-size:16px; color:{{ '#56d364' if siem_enabled else 'var(--text-muted)' }};">
+      {{ 'Aktif' if siem_enabled else 'Pasif' }}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Cisco Umbrella</div>
+    <div class="stat-value" style="font-size:16px; color:{{ '#56d364' if umbrella_active else 'var(--text-muted)' }};">
+      {{ 'Aktif' if umbrella_active else 'Pasif' }}
+    </div>
+  </div>
+</div>
+
+<!-- Son 24 saat aktivite -->
+<div class="card" style="margin-bottom:20px;">
+  <div class="card-header"><div class="card-title">Son 24 Saat Aktivite</div></div>
+  <div class="card-body">
+    {% if activity_24h %}
+    <div style="display:flex; gap:20px; flex-wrap:wrap;">
+      {% for action, count in activity_24h.items() %}
+      <div>
+        <div class="stat-label">
+          {% if action == 'ADD' %}Ekleme
+          {% elif action == 'REMOVE' %}Silme
+          {% elif action == 'LOGIN' %}Basarili Giris
+          {% elif action == 'LOGIN_FAIL' %}Basarisiz Giris
+          {% elif action == 'LOCKOUT' %}Hesap Kilidi
+          {% else %}{{ action }}{% endif %}
+        </div>
+        <div class="stat-value" style="font-size:20px;">{{ count }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">Son 24 saatte kayit yok</div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Feed dosyalari durumu -->
+<div class="card" style="margin-bottom:20px;">
+  <div class="card-header"><div class="card-title">Feed Dosyalari</div></div>
+  <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr><th>Feed</th><th>Durum</th><th>Kayit</th><th>Boyut</th><th>Son Guncelleme</th></tr>
+      </thead>
+      <tbody>
+        {% for f in feed_status %}
+        <tr>
+          <td class="mono">{{ f.name }}</td>
+          <td>
+            {% if f.exists %}
+            <span class="tag tag-allow">Var</span>
+            {% else %}
+            <span class="tag" style="background:rgba(255,255,255,.06); color:var(--text-muted);">Henuz olusmadi</span>
+            {% endif %}
+          </td>
+          <td>{{ f.entries if f.exists else '-' }}</td>
+          <td class="mono" style="font-size:11px;">{{ '%.1f KB'|format(f.size/1024) if f.exists else '-' }}</td>
+          <td class="mono" style="font-size:11px; color:var(--text-muted);">{{ f.mtime if f.exists else '-' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Log Goruntuleyici -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">
+      Log Goruntuleyici
+      {% if log_mtime %}<span class="badge">son yazma: {{ log_mtime }}</span>{% endif %}
+    </div>
+  </div>
+  <div class="card-body">
+    {% if available_logs %}
+    <form method="GET" class="toolbar" style="margin-bottom:14px;">
+      <div class="form-group">
+        <label>Log Dosyasi</label>
+        <select name="log" onchange="this.form.submit()">
+          {% for f in available_logs %}
+          <option value="{{ f }}" {{ 'selected' if f == selected_log }}>{{ f }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Satir Sayisi</label>
+        <select name="lines" onchange="this.form.submit()">
+          {% for n in [100, 200, 500, 1000] %}
+          <option value="{{ n }}" {{ 'selected' if n == lines }}>Son {{ n }} satir</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <a href="?log={{ selected_log }}&lines={{ lines }}" class="btn btn-secondary">Yenile</a>
+      </div>
+    </form>
+
+    <pre style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px;
+                font-family:var(--mono); font-size:11px; color:var(--text); max-height:500px; overflow:auto;
+                white-space:pre-wrap; word-break:break-all; margin:0;">{% if log_content %}{{ log_content }}{% else %}(log dosyasi bos veya bulunamadi){% endif %}</pre>
+    {% else %}
+    <div class="empty-state">Henuz log dosyasi olusmamis</div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
