@@ -36,15 +36,27 @@ denetlenebilir, rol bazlı yetkilendirme vardır, ve harici sistemlere
 **Güvenlik**
 - CSRF koruması, PBKDF2 (260.000 iterasyon) ile şifre hashleme
 - Brute-force koruması ve hesap kilitleme
-- Admin / Operator rol ayrımı
+- Rol bazlı yetki: admin, operator, read-write, blacklist-only,
+  allowlist-only, read-only (Roller sayfasından yönetilir)
 - Tüm işlemler audit log'a düşer (kim, ne zaman, ne, neden)
+
+**FortiGate Object Control**
+- Birden fazla FortiGate'in adres objesi ve adres grubu envanteri
+  (REST API veya SSH)
+- IP arama: hangi cihazda hangi obje/grupta geçtiğini gösterir
+  (iç içe gruplar dahil)
+- Blacklist koruması: IP zaten bir FortiGate'te tanımlıysa eklemeyi engeller
 
 **Entegrasyonlar**
 - **SIEM** — CEF formatında syslog forwarding (UDP/TCP)
 - **Cisco Umbrella** — blacklist domainlerini Management API ile otomatik
   senkronize eder
 - **Trend Micro TippingPoint SMS** — blacklist IP'lerini Reputation
-  Database'e otomatik ekler
+  Database'e, allowlist IP'lerini WhiteList'e otomatik ekler
+- **Cloudflare** — IP listelerini Cloudflare Rules Lists ile senkronize eder
+- **Brandefense EASM** — tarama yapan kaynak IP'leri çekip allowlist
+  hedeflerine (FortiGate feed, Cloudflare, TippingPoint) basar, listeden
+  çıkanları siler; elle eklenen kayıtlara dokunmaz
 - **Threat Intel Sorgu** — VirusTotal, AbuseIPDB, URLScan, Shodan, MXToolbox
   ile IP/domain/URL/hash sorgulama
 

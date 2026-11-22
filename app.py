@@ -5,6 +5,7 @@ import io
 import json
 import re
 import socket
+import ssl
 import logging
 import sqlite3
 import ipaddress
@@ -16,6 +17,8 @@ import urllib.parse
 import urllib.error
 import subprocess
 import platform
+import time
+import threading
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import (Flask, render_template, request, redirect,
@@ -29,8 +32,7 @@ app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 MB max upload
 APP_START_TIME = datetime.now()
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_default_feed_dir = r"C:\ThreatFeed\public" if platform.system() == "Windows" else "/opt/threatfeed/public"
-BASE_DIR   = os.environ.get("IOCMANAGER_FEED_DIR", _default_feed_dir)
+BASE_DIR   = r"C:\ThreatFeed\public"
 FEED_FILES = {
     "allowlist-ip":     os.path.join(BASE_DIR, "allowlist-ip.txt"),
     "blacklist-ip":     os.path.join(BASE_DIR, "blacklist-ip.txt"),
@@ -136,6 +138,19 @@ def init_db():
         key   TEXT PRIMARY KEY,
         value TEXT
     );
+    CREATE TABLE IF NOT EXISTS fortigate_devices (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT NOT NULL,
+        host       TEXT NOT NULL,
+        port       INTEGER NOT NULL DEFAULT 443,
+        method     TEXT NOT NULL DEFAULT 'api',
+        username   TEXT,
+        password   TEXT,
+        token      TEXT,
+        verify_ssl INTEGER NOT NULL DEFAULT 0,
+        enabled    INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT
+    );
     """)
     # Varsayilan SIEM ayarlari
     defaults = {
@@ -150,6 +165,14 @@ def init_db():
         "umbrella_secret":    "",
         "umbrella_list_id":   "",
         "umbrella_auto_sync": "0",
+        # Cloudflare Rules Lists (IP list)
+        "cloudflare_enabled":    "0",
+        "cloudflare_token":      "",
+        "cloudflare_account_id": "",
+        "cloudflare_list_id":    "",
+        "cloudflare_auto_sync":  "0",
+        "cloudflare_allow_list_id": "",
+        "cloudflare_allow_sync":    "0",
         # Trend Micro TippingPoint SMS Reputation Database
         "tippingpoint_enabled":          "0",
         "tippingpoint_server":           "",
@@ -158,6 +181,18 @@ def init_db():
         "tippingpoint_tag_value":        "",
         "tippingpoint_skip_ssl_verify":  "0",
         "tippingpoint_auto_sync":        "0",
+        "tippingpoint_allow_tag_category": "WhiteList",
+        "tippingpoint_allow_sync":         "0",
+        # Brandefense EASM - tarama (discovery) IP'leri -> allowlist hedefleri
+        "brandefense_enabled":        "0",
+        "brandefense_token":          "",
+        "brandefense_targets":        "allowlist-ip",
+        "brandefense_interval_hours": "24",
+        "brandefense_managed":        "[]",
+        "brandefense_feed_added":     "[]",
+        "brandefense_last_sync":      "",
+        "brandefense_last_sync_ts":   "",
+        "brandefense_last_result":    "",
         # Threat Intel API anahtarlari (bos = devre disi)
         "api_virustotal": "",
         "api_abuseipdb":  "",
@@ -462,18 +497,32 @@ def query_abuseipdb(indicator, itype):
     if not key or itype != "ip":
         return None
     try:
-        url = "https://api.abuseipdb.com/api/v2/check?ipAddress={}&maxAgeInDays=90".format(
+        # maxAgeInDays=365: AbuseIPDB web sitesi tum gecmisi gosterir; 90 gunluk
+        # varsayilan pencere rapor sayisini dusuk gosteriyordu (ornek: 927 yerine 321).
+        url = "https://api.abuseipdb.com/api/v2/check?ipAddress={}&maxAgeInDays=365".format(
             urllib.parse.quote(indicator))
         data = _http_get(url, headers={"Key": key, "Accept": "application/json"})
         d = data.get("data", {})
+        reports = d.get("totalReports", 0)
+        # Verdict artik abuse confidence skoruna degil, RAPOR SAYISINA gore:
+        #   raporlama < 3        -> temiz     (clean)
+        #   raporlama 3 - 10     -> supheli   (suspicious)
+        #   raporlama > 10       -> zararli   (malicious)
+        if reports > 10:
+            verdict = "malicious"
+        elif reports >= 3:
+            verdict = "suspicious"
+        else:
+            verdict = "clean"
         return {
             "source": "AbuseIPDB",
             "score": d.get("abuseConfidenceScore", 0),
-            "reports": d.get("totalReports", 0),
+            "reports": reports,
             "country": d.get("countryCode", "-"),
             "isp": d.get("isp", "-"),
             "usage": d.get("usageType", "-"),
-            "verdict": "malicious" if d.get("abuseConfidenceScore", 0) >= 50 else "clean",
+            "domain": d.get("domain") or "-",
+            "verdict": verdict,
         }
     except urllib.error.HTTPError as e:
         return {"source": "AbuseIPDB", "error": "HTTP {}".format(e.code)}
@@ -631,6 +680,366 @@ def query_mxtoolbox(indicator, itype):
         return {"source": "MXToolbox", "error": "HTTP {}".format(e.code)}
     except Exception as e:
         return {"source": "MXToolbox", "error": str(e)[:100]}
+
+
+# ============================================================================
+# FortiGate Firewall Envanter Sorgusu (v1.7.0)
+# ----------------------------------------------------------------------------
+# - Adres objeleri + adres gruplari envanteri
+# - IP arama: tekil obje eslesmesi + grup uyeligi (ic ice gruplar dahil)
+# - Referans degeri (q_ref): sadece eslesen obje/gruplar icin okunur (hizli)
+# - Blacklist ekleme korumasi: IP zaten bir FGT'de varsa ekleme engellenir
+#
+# SSH: Windows dahili ssh.exe / plink (paramiko YOK - GPO uyumlu)
+# REST API: urllib ile /api/v2/cmdb/firewall/{address,addrgrp}
+# ============================================================================
+import subprocess, ipaddress
+
+def get_fortigate_devices(enabled_only=True):
+    db = get_db()
+    q = "SELECT id, name, host, port, method, username, password, token, verify_ssl, enabled FROM fortigate_devices"
+    if enabled_only:
+        q += " WHERE enabled = 1"
+    q += " ORDER BY name"
+    rows = db.execute(q).fetchall()
+    out = []
+    for r in rows:
+        out.append({"id": r[0], "name": r[1], "host": r[2], "port": r[3],
+                    "method": r[4], "username": r[5], "password": r[6],
+                    "token": r[7], "verify_ssl": bool(r[8]), "enabled": bool(r[9])})
+    return out
+
+def get_fortigate_device(dev_id):
+    for d in get_fortigate_devices(enabled_only=False):
+        if d["id"] == int(dev_id):
+            return d
+    return None
+
+def _fgt_ssl_context(verify):
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+def _fgt_ip_in_subnet(ip, subnet_str):
+    try:
+        parts = subnet_str.split()
+        if len(parts) == 2:
+            net = ipaddress.ip_network("{}/{}".format(parts[0], parts[1]), strict=False)
+        else:
+            net = ipaddress.ip_network(subnet_str, strict=False)
+        return ipaddress.ip_address(ip) in net
+    except Exception:
+        return False
+
+# ── SSH calistirma ────────────────────────────────────────────────────────────
+def _shell_quote(s):
+    """Windows cmd icin komutu cift tirnak icine alir (bosluk/ozel karakter guvenligi)."""
+    return '"{}"'.format(s.replace('"', '""'))
+
+
+def _find_ssh_binary(name):
+    """ssh.exe veya plink.exe'yi bilinen konumlarda arar. NSSM/SYSTEM hesabinin
+    PATH'inde bulunmayabilecegi icin tam yollari da dener. Bulamazsa cikplak
+    ismi doner (PATH'te varsa calisir)."""
+    import shutil
+    # once PATH'te var mi
+    found = shutil.which(name)
+    if found:
+        return found
+    # bilinen tam yollar
+    candidates = []
+    if name == "ssh":
+        candidates = [
+            r"C:\Windows\System32\OpenSSH\ssh.exe",
+            r"C:\Windows\Sysnative\OpenSSH\ssh.exe",  # 32-bit process -> 64-bit System32
+            r"C:\Program Files\OpenSSH\ssh.exe",
+            r"C:\Program Files\OpenSSH-Win64\ssh.exe",
+        ]
+    elif name == "plink":
+        candidates = [
+            r"C:\IoCManager\plink.exe",              # uygulama klasorune konulmus olabilir
+            r"C:\Program Files\PuTTY\plink.exe",
+            r"C:\Program Files (x86)\PuTTY\plink.exe",
+        ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return name  # son care: ciplak isim (FileNotFoundError verirse yakalanir)
+
+
+def _fgt_ssh_run(device, remote_cmd):
+    """FGT'ye SSH ile baglanip komut ciktisini doner. (output, error)"""
+    host = device["host"]; port = str(device.get("port") or 22)
+    user = device["username"]; password = device.get("password") or ""
+    try:
+        if password:
+            plink = _find_ssh_binary("plink")
+            # plink ilk baglantida host key'i tanimaz ve -batch modunda reddeder.
+            # Ic agdaki kendi cihazimiz oldugundan, "y" ile host key'i otomatik
+            # kabul ediyoruz: 'cmd /c echo y | plink ...' ile plink'in
+            # "Store key in cache? (y/n)" sorusuna otomatik y yaniti veriyoruz.
+            # (echo y, hem host key kabulu hem batch guvenligi icin -batch YOK)
+            cmd_str = 'echo y | "{}" -ssh -P {} -l {} -pw {} {} {}'.format(
+                plink, port, _shell_quote(user), _shell_quote(password),
+                _shell_quote(host), _shell_quote(remote_cmd))
+            proc = subprocess.run(cmd_str, shell=True, capture_output=True, text=True, timeout=25)
+        else:
+            ssh = _find_ssh_binary("ssh")
+            proc = subprocess.run(
+                [ssh, "-p", port, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                 "-o", "ConnectTimeout=10", "{}@{}".format(user, host), remote_cmd],
+                capture_output=True, text=True, timeout=25)
+        if proc.returncode != 0 and not proc.stdout:
+            return None, (proc.stderr or "baglanti basarisiz")[:200]
+        return proc.stdout, None
+    except FileNotFoundError:
+        if password:
+            return None, "plink.exe bulunamadi. Parola ile SSH icin PuTTY plink.exe'yi C:\\IoCManager\\ klasorune koyun."
+        return None, "ssh.exe bulunamadi (C:\\Windows\\System32\\OpenSSH\\ssh.exe kontrol edin)"
+    except subprocess.TimeoutExpired:
+        return None, "zaman asimi (25s) - cihaza erisilemiyor olabilir"
+    except Exception as e:
+        return None, str(e)[:200]
+
+# ── REST API cagrisi ──────────────────────────────────────────────────────────
+def _fgt_api_get(device, path):
+    host = device["host"]; port = device.get("port") or 443
+    token = device.get("token") or ""; verify = bool(device.get("verify_ssl"))
+    ctx = _fgt_ssl_context(verify)
+
+    # Yontem 1: Authorization: Bearer header (yeni FortiOS surumlerinin tercihi)
+    url_plain = "https://{}:{}{}".format(host, port, path)
+    req = urllib.request.Request(url_plain, method="GET")
+    req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            raise
+        # 401 - Bearer kabul edilmedi, URL access_token yontemini dene
+    # Yontem 2: URL access_token parametresi (eski yontem / bazi surumler)
+    sep = "&" if "?" in path else "?"
+    url_token = "https://{}:{}{}{}access_token={}".format(host, port, path, sep, urllib.parse.quote(token))
+    req2 = urllib.request.Request(url_token, method="GET")
+    with urllib.request.urlopen(req2, timeout=15, context=ctx) as resp:
+        return json.loads(resp.read().decode())
+
+# ── Config parse (SSH ciktisi) ────────────────────────────────────────────────
+def _parse_addresses_cli(config_text):
+    """'show firewall address' -> {ad: {type, value, comment}}"""
+    objs = {}
+    cur = None
+    for line in config_text.splitlines():
+        s = line.strip()
+        if s.startswith('edit "'):
+            cur = {"name": s[6:].rstrip('"'), "type": "ipmask", "value": "", "comment": ""}
+        elif s.startswith("set subnet ") and cur:
+            cur["type"] = "ipmask"; cur["value"] = s[len("set subnet "):]
+        elif s.startswith("set type ") and cur:
+            cur["type"] = s[len("set type "):]
+        elif s.startswith("set start-ip ") and cur:
+            cur["value"] = s[len("set start-ip "):]
+        elif s.startswith("set end-ip ") and cur:
+            cur["value"] += " - " + s[len("set end-ip "):]
+        elif s.startswith("set fqdn ") and cur:
+            cur["value"] = s[len("set fqdn "):].strip('"')
+        elif s.startswith("set comment ") and cur:
+            cur["comment"] = s[len("set comment "):].strip('"')
+        elif s == "next" and cur:
+            objs[cur["name"]] = cur; cur = None
+    return objs
+
+def _parse_addrgrps_cli(config_text):
+    """'show firewall addrgrp' -> {grup_ad: [uye_ad, ...]}"""
+    grps = {}
+    cur = None
+    for line in config_text.splitlines():
+        s = line.strip()
+        if s.startswith('edit "'):
+            cur = {"name": s[6:].rstrip('"'), "members": []}
+        elif s.startswith("set member ") and cur:
+            # set member "A" "B" "C"
+            members = [m.strip('"') for m in s[len("set member "):].split('" "')]
+            members = [m.strip('"') for m in members]
+            cur["members"] = members
+        elif s == "next" and cur:
+            grps[cur["name"]] = cur["members"]; cur = None
+    return grps
+
+# ── Referans degeri (q_ref) - sadece eslesen obje/grup icin ───────────────────
+def _fgt_get_refcount(device, obj_name, is_group=False):
+    """Bir obje/grubun kac yerde (policy vb.) kullanildigini doner. Bulunamazsa None."""
+    kind = "addrgrp" if is_group else "address"
+    if device.get("method") == "api":
+        try:
+            data = _fgt_api_get(device, "/api/v2/cmdb/firewall/{}/{}".format(kind, urllib.parse.quote(obj_name)))
+            res = data.get("results", [])
+            if res and isinstance(res, list):
+                return res[0].get("q_ref", None)
+        except Exception:
+            return None
+        return None
+    else:
+        # SSH: get firewall address <ad> -> "q_ref: N"
+        cmd = "get firewall {} {}".format(kind, obj_name)
+        out, err = _fgt_ssh_run(device, cmd)
+        if not out:
+            return None
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("q_ref"):
+                try:
+                    return int(s.split(":")[1].strip())
+                except Exception:
+                    return None
+        return None
+
+# ── Envanter: cihazin tum obje + gruplarini getir ─────────────────────────────
+def fortigate_inventory(device):
+    """Bir cihazin adres objelerini ve gruplarini doner.
+    q_ref (referans sayisi) ana envanter cagrisinda zaten geldigi icin burada
+    saklanir - ayrica sorgu ATILMAZ (performans)."""
+    if device.get("method") == "api":
+        try:
+            addr_data = _fgt_api_get(device, "/api/v2/cmdb/firewall/address")
+            grp_data = _fgt_api_get(device, "/api/v2/cmdb/firewall/addrgrp")
+        except urllib.error.HTTPError as e:
+            return {"error": "HTTP {}".format(e.code)}
+        except Exception as e:
+            return {"error": str(e)[:150]}
+        objects = {}
+        for o in addr_data.get("results", []):
+            t = o.get("type", "ipmask")
+            if t == "ipmask":
+                val = o.get("subnet", "")
+            elif t == "iprange":
+                val = "{} - {}".format(o.get("start-ip",""), o.get("end-ip",""))
+            elif t == "fqdn":
+                val = o.get("fqdn", "")
+            else:
+                val = o.get("subnet", "") or o.get("fqdn", "")
+            objects[o.get("name","")] = {"name": o.get("name",""), "type": t,
+                                          "value": val, "comment": o.get("comment",""),
+                                          "q_ref": o.get("q_ref", None)}
+        groups = {}
+        group_refs = {}
+        for g in grp_data.get("results", []):
+            members = [m.get("name","") for m in g.get("member", [])]
+            groups[g.get("name","")] = members
+            group_refs[g.get("name","")] = g.get("q_ref", None)
+        return {"objects": objects, "groups": groups, "group_refs": group_refs}
+    else:
+        addr_out, addr_err = _fgt_ssh_run(device, "show firewall address")
+        if addr_err:
+            return {"error": addr_err}
+        grp_out, grp_err = _fgt_ssh_run(device, "show firewall addrgrp")
+        if grp_err:
+            return {"error": grp_err}
+        return {"objects": _parse_addresses_cli(addr_out),
+                "groups": _parse_addrgrps_cli(grp_out), "group_refs": {}}
+
+# ── IP arama: tekil obje + grup uyeligi (ic ice dahil) + referans ─────────────
+def _object_matches_ip(obj, ip):
+    t = obj.get("type", "ipmask")
+    val = obj.get("value", "")
+    if t == "ipmask":
+        return _fgt_ip_in_subnet(ip, val)
+    if t == "iprange":
+        try:
+            parts = val.split(" - ")
+            return len(parts) == 2 and ipaddress.ip_address(parts[0]) <= ipaddress.ip_address(ip) <= ipaddress.ip_address(parts[1])
+        except Exception:
+            return False
+    return False  # fqdn/wildcard IP ile eslesmez
+
+def _groups_containing(obj_name, groups):
+    """obj_name'i (dogrudan veya ic ice) iceren tum gruplari doner."""
+    result = set()
+    # dogrudan uyelik
+    changed = True
+    members_map = {obj_name}
+    while changed:
+        changed = False
+        for gname, members in groups.items():
+            if gname in result:
+                continue
+            if any(m in members_map for m in members):
+                result.add(gname)
+                members_map.add(gname)  # bu grup baska grupta olabilir (ic ice)
+                changed = True
+    return result
+
+def fortigate_search_ip(device, ip):
+    """Bir cihazda IP arar: eslesen tekil objeler + o objelerin oldugu gruplar
+    (ic ice gruplar dahil), her biri icin referans degeri (q_ref).
+    CANLI sorgu - her aramada guncel envanter cekilir."""
+    inv = fortigate_inventory(device)
+    if inv.get("error"):
+        return {"device": device["name"], "error": inv["error"]}
+
+    objects = inv["objects"]; groups = inv["groups"]
+    group_refs = inv.get("group_refs", {})
+    matched_objects = []
+    all_matched_names = set()
+
+    for name, obj in objects.items():
+        if _object_matches_ip(obj, ip):
+            all_matched_names.add(name)
+            matched_objects.append({"name": name, "type": obj["type"],
+                                    "value": obj["value"], "comment": obj.get("comment", ""),
+                                    "q_ref": obj.get("q_ref", None)})
+
+    # eslesen objelerin uye oldugu gruplar
+    matched_groups = []
+    seen_groups = set()
+    for oname in all_matched_names:
+        for gname in _groups_containing(oname, groups):
+            if gname in seen_groups:
+                continue
+            seen_groups.add(gname)
+            matched_groups.append({"name": gname, "q_ref": group_refs.get(gname, None),
+                                   "via_object": oname})
+
+    return {"device": device["name"], "device_id": device["id"],
+            "found": bool(matched_objects),
+            "objects": matched_objects, "groups": matched_groups,
+            "total_objects": len(objects), "total_groups": len(groups)}
+
+def fortigate_search_ip_multi(ip, device_ids=None):
+    """Secili (veya tum) cihazlarda paralel IP aramasi."""
+    import concurrent.futures
+    devices = get_fortigate_devices(enabled_only=True)
+    if device_ids:
+        device_ids = set(int(x) for x in device_ids)
+        devices = [d for d in devices if d["id"] in device_ids]
+    if not devices:
+        return []
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(devices), 8)) as ex:
+        futures = {ex.submit(fortigate_search_ip, d, ip): d for d in devices}
+        for f in concurrent.futures.as_completed(futures, timeout=60):
+            try:
+                results.append(f.result())
+            except Exception as e:
+                d = futures[f]
+                results.append({"device": d["name"], "error": str(e)[:150]})
+    return results
+
+def fortigate_check_before_blacklist(ip):
+    """Blacklist'e eklemeden once: IP herhangi bir FGT'de var mi?
+    Donen: (engellensin_mi, [eslesme_detaylari])"""
+    results = fortigate_search_ip_multi(ip)
+    hits = []
+    for r in results:
+        if r.get("error"):
+            continue
+        if r.get("found"):
+            hits.append(r)
+    return (len(hits) > 0, hits)
+
 
 def enrich_indicator(indicator, itype=None):
     """Tum aktif kaynaklara sorgu atar, sonuclari toplar."""
@@ -810,6 +1219,297 @@ def umbrella_sync_all():
     except Exception as e:
         return 0, [str(e)[:100]]
 
+# ── Cloudflare Rules Lists (IP list) ──────────────────────────────────────────
+# Hesap-bazli IP listeleri. Liste yoksa otomatik olusturulur.
+#   blacklist-ip  -> iocmanager_blacklist  (WAF'ta Block)
+#   allowlist-ip  -> iocmanager_allowlist  (WAF'ta Skip)   [v1.11.0]
+# API: https://api.cloudflare.com/client/v4/accounts/{acct}/rules/lists
+# Auth: Bearer API Token (izin: Account -> Account Filter Lists -> Edit)
+CLOUDFLARE_API       = "https://api.cloudflare.com/client/v4"
+CLOUDFLARE_LIST_NAME = "iocmanager_blacklist"   # sadece harf/rakam/alt cizgi, max 50
+CLOUDFLARE_LISTS = {
+    False: {"name": "iocmanager_blacklist", "setting": "cloudflare_list_id",
+            "feed": "blacklist-ip", "desc": "IoCManager blacklist - otomatik senkronize edilir"},
+    True:  {"name": "iocmanager_allowlist", "setting": "cloudflare_allow_list_id",
+            "feed": "allowlist-ip", "desc": "IoCManager allowlist - otomatik senkronize edilir"},
+}
+
+def cloudflare_enabled():
+    return (get_setting("cloudflare_enabled") == "1"
+            and bool(get_setting("cloudflare_token"))
+            and bool(get_setting("cloudflare_account_id")))
+
+def _cloudflare_req(method, path, token, body=None):
+    """Cloudflare API cagrisi. success=false ise Exception firlatir."""
+    url = CLOUDFLARE_API + path
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=_get_ssl_context()) as resp:
+            raw = resp.read().decode()
+            j = json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode()
+        except Exception:
+            err_body = ""
+        msg = err_body[:250]
+        try:
+            ej = json.loads(err_body)
+            errs = ej.get("errors", []) or []
+            if errs:
+                msg = "; ".join("{} {}".format(x.get("code", ""), x.get("message", "")) for x in errs)[:250]
+        except Exception:
+            pass
+        raise urllib.error.HTTPError(e.url, e.code, "{} - {}".format(e.reason, msg), e.headers, None)
+    if not j.get("success", False):
+        errs = j.get("errors", []) or []
+        emsg = "; ".join("{} {}".format(x.get("code", ""), x.get("message", "")) for x in errs) or "bilinmeyen hata"
+        raise Exception("Cloudflare API: " + emsg[:250])
+    return j
+
+def cloudflare_get_or_create_list(token, account_id, allow=False):
+    """IoCManager IP listesini (black/allow) bulur, yoksa olusturur. List ID doner."""
+    cfg = CLOUDFLARE_LISTS[allow]
+    saved_id = get_setting(cfg["setting"])
+    j = _cloudflare_req("GET", "/accounts/{}/rules/lists".format(account_id), token)
+    for lst in j.get("result", []) or []:
+        if saved_id and str(lst.get("id")) == str(saved_id):
+            return saved_id
+        if lst.get("name") == cfg["name"]:
+            set_setting(cfg["setting"], str(lst.get("id")))
+            return str(lst.get("id"))
+    created = _cloudflare_req("POST", "/accounts/{}/rules/lists".format(account_id), token, {
+        "name": cfg["name"], "kind": "ip", "description": cfg["desc"],
+    })
+    new_id = str(created.get("result", {}).get("id", ""))
+    if new_id:
+        set_setting(cfg["setting"], new_id)
+    return new_id
+
+def cloudflare_add_ip(ip, allow=False):
+    """IP'yi (veya CIDR) ilgili Cloudflare IP listesine ekler (async append)."""
+    try:
+        token      = get_setting("cloudflare_token")
+        account_id = get_setting("cloudflare_account_id")
+        if not token or not account_id:
+            return False, "Token/Account ID yok"
+        list_id = cloudflare_get_or_create_list(token, account_id, allow)
+        if not list_id:
+            return False, "Liste olusturulamadi"
+        _cloudflare_req("POST",
+            "/accounts/{}/rules/lists/{}/items".format(account_id, list_id),
+            token, [{"ip": ip, "comment": "IoCManager"}])
+        return True, "OK"
+    except urllib.error.HTTPError as e:
+        return False, "HTTP {} - {}".format(e.code, e.reason)[:180]
+    except Exception as e:
+        return False, str(e)[:150]
+
+def cloudflare_remove_ip(ip, allow=False):
+    """IP'yi listeden siler. Once item ID'sini bulur (sayfali), sonra DELETE."""
+    try:
+        token      = get_setting("cloudflare_token")
+        account_id = get_setting("cloudflare_account_id")
+        if not token or not account_id:
+            return False, "Token/Account ID yok"
+        list_id = get_setting(CLOUDFLARE_LISTS[allow]["setting"])
+        if not list_id:
+            return False, "Liste ID yok"
+        target = ip.split("/")[0]
+        item_id = None
+        cursor = None
+        for _ in range(100):  # guvenlik siniri (100 * 500 = 50k item)
+            path = "/accounts/{}/rules/lists/{}/items?per_page=500".format(account_id, list_id)
+            if cursor:
+                path += "&cursor=" + urllib.parse.quote(cursor)
+            j = _cloudflare_req("GET", path, token)
+            for it in j.get("result", []) or []:
+                if str(it.get("ip", "")).split("/")[0] == target:
+                    item_id = it.get("id")
+                    break
+            if item_id:
+                break
+            cursor = ((j.get("result_info", {}) or {}).get("cursors", {}) or {}).get("after")
+            if not cursor:
+                break
+        if not item_id:
+            return True, "Zaten yok"
+        # Listede bekleyen bir bulk islem varsa Cloudflare 400 donebilir -> kisa bekleyip tekrar dene
+        for attempt in range(4):
+            try:
+                _cloudflare_req("DELETE",
+                    "/accounts/{}/rules/lists/{}/items".format(account_id, list_id),
+                    token, {"items": [{"id": item_id}]})
+                return True, "OK"
+            except urllib.error.HTTPError as e:
+                if e.code in (400, 409, 429) and attempt < 3:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                raise
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return True, "Zaten yok"
+        return False, "HTTP {} - {}".format(e.code, e.reason)[:200]
+    except Exception as e:
+        return False, str(e)[:150]
+
+def cloudflare_sync_all(allow=False):
+    """Ilgili feed'i (blacklist-ip / allowlist-ip) komple Cloudflare listesine iter (PUT)."""
+    try:
+        token      = get_setting("cloudflare_token")
+        account_id = get_setting("cloudflare_account_id")
+        if not token or not account_id:
+            return 0, ["Token/Account ID yok"]
+        list_id = cloudflare_get_or_create_list(token, account_id, allow)
+        if not list_id:
+            return 0, ["Liste olusturulamadi"]
+        ips   = read_feed(CLOUDFLARE_LISTS[allow]["feed"])
+        items = [{"ip": ip, "comment": "IoCManager"} for ip in ips if ip]
+        _cloudflare_req("PUT",
+            "/accounts/{}/rules/lists/{}/items".format(account_id, list_id), token, items)
+        return len(items), []
+    except urllib.error.HTTPError as e:
+        return 0, ["HTTP {} - {}".format(e.code, e.reason)[:120]]
+    except Exception as e:
+        return 0, [str(e)[:120]]
+
+# ── Brandefense EASM: tarama IP'leri -> allowlist hedefleri ───────────────────
+# Brandefense'in EASM taramasi yaptigi kaynak IP'ler cekilir ve secilen
+# allowlist hedeflerine basilir (taramalar engellenmesin diye).
+# Hedefler: allowlist-ip feed'i (FortiGate external feed), Cloudflare allowlist,
+# TippingPoint WhiteList. Brandefense listesinden cikan IP'ler hedeflerden de
+# silinir; elle eklenmis kayitlara dokunulmaz.
+BRANDEFENSE_URL = "https://api.brandefense.io/api/v2/easm/discovery/discovery-ips"
+BRANDEFENSE_TARGETS = [
+    ("allowlist-ip", "IoCManager allowlist-ip (FortiGate feed)"),
+    ("cloudflare",   "Cloudflare allowlist"),
+    ("tippingpoint", "TippingPoint WhiteList"),
+]
+
+def brandefense_enabled():
+    return get_setting("brandefense_enabled") == "1" and bool(get_setting("brandefense_token"))
+
+def brandefense_fetch_ips():
+    """Brandefense discovery IP'lerini ceker. Doner: ({ip: type}, [gecersiz])."""
+    token = get_setting("brandefense_token")
+    if not token:
+        raise RuntimeError("Brandefense API token tanimli degil")
+    req = urllib.request.Request(BRANDEFENSE_URL + "?format=json", headers={
+        "Authorization": "Bearer " + token, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=_get_ssl_context()) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise RuntimeError("401 - Token gecersiz veya yetkilendirme hatali")
+        if e.code == 403:
+            raise RuntimeError("403 - Token'da 'EASM Read' yetkisi yok")
+        raise RuntimeError("HTTP {}".format(e.code))
+    items = data.get("data", []) if isinstance(data, dict) else (data or [])
+    ips, invalid = {}, []
+    for it in items:
+        raw = (it.get("ip") if isinstance(it, dict) else str(it)) or ""
+        ok, entry, _reason = process_entry("allowlist-ip", str(raw).strip())
+        if ok:
+            ips[entry] = (it.get("type") if isinstance(it, dict) else "") or "-"
+        elif raw:
+            invalid.append(str(raw))
+    return ips, invalid
+
+def brandefense_sync(full=False, actor="brandefense"):
+    """Brandefense IP'lerini secili hedeflere senkronize eder.
+    full=True: tum guncel IP'ler tekrar gonderilir (hedef yeni secildiyse).
+    full=False: sadece yeni eklenen/cikan IP'ler islenir (zamanlanmis calisma)."""
+    fetched, invalid = brandefense_fetch_ips()
+    targets = {t for t in get_setting("brandefense_targets").split(",") if t}
+    managed = set(json.loads(get_setting("brandefense_managed") or "[]"))
+    current = set(fetched)
+    black = set(read_feed("blacklist-ip"))
+    conflicts = sorted(x for x in current if x in black)
+    current -= set(conflicts)
+    new  = current if full else (current - managed)
+    gone = managed - current
+    res = {"fetched": len(fetched), "new": len(current - managed), "removed": len(gone),
+           "conflicts": conflicts, "invalid": invalid, "errors": [], "targets": sorted(targets)}
+
+    if "allowlist-ip" in targets:
+        feed  = set(read_feed("allowlist-ip"))
+        added_by_bd = set(json.loads(get_setting("brandefense_feed_added") or "[]"))
+        add = sorted(x for x in new if x not in feed)
+        rem = sorted(x for x in gone if x in feed and x in added_by_bd)
+        if add or rem:
+            feed.update(add); feed.difference_update(rem)
+            write_feed("allowlist-ip", list(feed))
+        for x in add:
+            log_action(actor, "ADD", "allowlist-ip", x, "Brandefense EASM tarama IP'si", "-")
+        for x in rem:
+            log_action(actor, "REMOVE", "allowlist-ip", x, "Brandefense listesinden cikti", "-")
+        added_by_bd = (added_by_bd | set(add)) - set(rem)
+        set_setting("brandefense_feed_added", json.dumps(sorted(added_by_bd)))
+
+    if "cloudflare" in targets:
+        if not cloudflare_enabled():
+            res["errors"].append("Cloudflare entegrasyonu aktif degil")
+        else:
+            for x in sorted(new):
+                ok, m = cloudflare_add_ip(x, allow=True)
+                if not ok: res["errors"].append("Cloudflare {}: {}".format(x, m))
+            for x in sorted(gone):
+                ok, m = cloudflare_remove_ip(x, allow=True)
+                if not ok: res["errors"].append("Cloudflare sil {}: {}".format(x, m))
+
+    if "tippingpoint" in targets:
+        if not tippingpoint_enabled():
+            res["errors"].append("TippingPoint entegrasyonu aktif degil")
+        else:
+            for x in sorted(new):
+                ok, m = tippingpoint_add_entry(x, "ip", allow=True)
+                if not ok: res["errors"].append("TippingPoint {}: {}".format(x, m))
+            for x in sorted(gone):
+                ok, m = tippingpoint_remove_entry(x, "ip")
+                if not ok: res["errors"].append("TippingPoint sil {}: {}".format(x, m))
+
+    set_setting("brandefense_managed", json.dumps(sorted(current)))
+    now = datetime.now()
+    set_setting("brandefense_last_sync", now.strftime("%Y-%m-%d %H:%M:%S"))
+    set_setting("brandefense_last_sync_ts", str(int(now.timestamp())))
+    summary = "{} IP cekildi, {} yeni, {} cikan, {} cakisma, {} hata".format(
+        res["fetched"], res["new"], res["removed"], len(conflicts), len(res["errors"]))
+    set_setting("brandefense_last_result", summary)
+    log_action(actor, "SYNC", "brandefense", "-", summary, "-")
+    return res
+
+def _brandefense_scheduler():
+    """Arka plan: 5 dakikada bir kontrol, aralik dolduysa senkron."""
+    while True:
+        try:
+            with app.app_context():
+                if brandefense_enabled():
+                    hrs = float(get_setting("brandefense_interval_hours") or 0)
+                    last = get_setting("brandefense_last_sync_ts")
+                    if hrs > 0 and (not last or time.time() - float(last) >= hrs * 3600):
+                        brandefense_sync(full=False, actor="brandefense-auto")
+        except Exception as e:
+            try:
+                with app.app_context():
+                    set_setting("brandefense_last_result", "Otomatik senkron hatasi: {}".format(str(e)[:150]))
+                    set_setting("brandefense_last_sync_ts", str(int(time.time())))
+            except Exception:
+                pass
+        time.sleep(300)
+
+_BG_STARTED = False
+def start_background_jobs():
+    global _BG_STARTED
+    if _BG_STARTED or os.environ.get("IOCMANAGER_NO_SCHEDULER") == "1":
+        return
+    _BG_STARTED = True
+    threading.Thread(target=_brandefense_scheduler, name="brandefense-sync", daemon=True).start()
+
 # ── Trend Micro TippingPoint SMS Reputation Database ──────────────────────────
 def _tippingpoint_ssl_context():
     if get_setting("tippingpoint_skip_ssl_verify") == "1":
@@ -836,16 +1536,24 @@ def _tippingpoint_request(path, params=None, method="GET"):
 # Reputation DB API sadece ip/dns/url destekler - hash icin parametre yok
 _TPT_TYPE_PARAM = {"ip": "ip", "domain": "dns", "url": "url"}
 
-def tippingpoint_add_entry(entry, itype):
+# WhiteList/BlackList tag kategorisi (List tipi) degerleri: IP / DNS / URL
+_TPT_TAG_VALUE = {"ip": "IP", "domain": "DNS", "url": "URL"}
+
+def tippingpoint_add_entry(entry, itype, allow=False):
     param = _TPT_TYPE_PARAM.get(itype)
     if not param:
         return False, "Desteklenmeyen tip (sadece ip/domain/url)"
     params = {param: entry}
-    tag_cat = get_setting("tippingpoint_tag_category").strip()
-    tag_val = get_setting("tippingpoint_tag_value").strip()
-    # TagData opsiyonel - ikisi de doluysa gonder, degilse sade IP/domain/url eklenir
-    if tag_cat and tag_val:
-        params["TagData"] = "{},{}".format(tag_cat, tag_val)
+    if allow:
+        # Allowlist: SMS'teki WhiteList tag kategorisi, deger tipe gore (IP/DNS/URL)
+        tag_cat = get_setting("tippingpoint_allow_tag_category").strip() or "WhiteList"
+        params["TagData"] = "{},{}".format(tag_cat, _TPT_TAG_VALUE[itype])
+    else:
+        tag_cat = get_setting("tippingpoint_tag_category").strip()
+        tag_val = get_setting("tippingpoint_tag_value").strip()
+        # TagData opsiyonel - ikisi de doluysa gonder, degilse sade IP/domain/url eklenir
+        if tag_cat and tag_val:
+            params["TagData"] = "{},{}".format(tag_cat, tag_val)
     try:
         raw = _tippingpoint_request("/repEntries/add", params)
         return True, raw.strip()[:150] if raw else "OK"
@@ -890,6 +1598,66 @@ def tippingpoint_sync_all():
 def tippingpoint_feed_itype(feed):
     """TippingPoint entegrasyonu sadece blacklist-ip'yi destekler."""
     return {"blacklist-ip": "ip"}.get(feed)
+
+def tippingpoint_allow_feed_itype(feed):
+    """Allowlist (WhiteList tag) senkronu: allowlist-ip."""
+    return {"allowlist-ip": "ip"}.get(feed)
+
+def tippingpoint_allow_sync_all():
+    """allowlist-ip'yi SMS Reputation DB'ye WhiteList tag'i ile iter."""
+    ok_count, fail = 0, []
+    for entry in read_feed("allowlist-ip"):
+        success, msg = tippingpoint_add_entry(entry, "ip", allow=True)
+        if success:
+            ok_count += 1
+        else:
+            fail.append("{} ({})".format(entry, msg))
+    return ok_count, fail
+
+def opposite_feed(feed):
+    """blacklist-X <-> allowlist-X karsiligi (yoksa None). Cakisma kontrolu icin."""
+    if feed.startswith("blacklist-"):
+        o = "allowlist-" + feed[len("blacklist-"):]
+    elif feed.startswith("allowlist-"):
+        o = "blacklist-" + feed[len("allowlist-"):]
+    else:
+        return None
+    return o if o in FEED_FILES else None
+
+def sync_allowlist_add(feed, entries):
+    """allowlist-ip eklemelerini Cloudflare ve TippingPoint'e yansitir. (ok_mesajlari, hata_mesajlari)"""
+    oks, errs = [], []
+    if feed != "allowlist-ip" or not entries:
+        return oks, errs
+    if cloudflare_enabled() and get_setting("cloudflare_allow_sync") == "1":
+        c_ok, c_msg = 0, ""
+        for e in entries:
+            ok, m = cloudflare_add_ip(e, allow=True)
+            if ok: c_ok += 1
+            else: c_msg = m
+        if c_ok: oks.append("{} IP Cloudflare allowlist'e gonderildi.".format(c_ok))
+        if c_msg: errs.append("Cloudflare allowlist hatasi: {}".format(c_msg))
+    if tippingpoint_enabled() and get_setting("tippingpoint_allow_sync") == "1":
+        t_ok, t_msg = 0, ""
+        for e in entries:
+            ok, m = tippingpoint_add_entry(e, "ip", allow=True)
+            if ok: t_ok += 1
+            else: t_msg = m
+        if t_ok: oks.append("{} IP TippingPoint WhiteList'e gonderildi.".format(t_ok))
+        if t_msg: errs.append("TippingPoint WhiteList hatasi: {}".format(t_msg))
+    return oks, errs
+
+def sync_allowlist_remove(feed, entry):
+    oks, errs = [], []
+    if feed != "allowlist-ip":
+        return oks, errs
+    if cloudflare_enabled() and get_setting("cloudflare_allow_sync") == "1":
+        ok, m = cloudflare_remove_ip(entry, allow=True)
+        (oks if ok else errs).append("Cloudflare allowlist'ten silindi." if ok else "Cloudflare allowlist'ten silinemedi: {}".format(m))
+    if tippingpoint_enabled() and get_setting("tippingpoint_allow_sync") == "1":
+        ok, m = tippingpoint_remove_entry(entry, "ip")
+        (oks if ok else errs).append("TippingPoint WhiteList'ten silindi." if ok else "TippingPoint'ten silinemedi: {}".format(m))
+    return oks, errs
 
 
 def validate_ip(ip_str):
@@ -1040,6 +1808,37 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
+
+# ── Rol tabanli liste yazma yetkisi ───────────────────────────────────────────
+# Roller:
+#   admin        - her sey (kullanici yonetimi, entegrasyonlar dahil)
+#   operator     - tum listelere yaz (eski davranis, geriye uyumluluk)
+#   read-write   - tum listelere yaz (blacklist + allowlist)
+#   blacklist-only - sadece blacklist-* listelerine yaz
+#   allowlist-only - sadece allowlist-* listelerine yaz
+#   read-only    - hicbir listeye yazamaz, sadece goruntuler
+VALID_ROLES = ("admin", "operator", "read-write", "blacklist-only", "allowlist-only", "read-only")
+
+def can_write_feed(role, feed):
+    """Verilen rolun, verilen feed'e (blacklist-ip, allowlist-domain vb.)
+    yazma yetkisi var mi?"""
+    if role in ("admin", "operator", "read-write"):
+        return True
+    if role == "blacklist-only":
+        return feed.startswith("blacklist")
+    if role == "allowlist-only":
+        return feed.startswith("allowlist")
+    # read-only ve bilinmeyen roller: yazamaz
+    return False
+
+def require_feed_write(feed):
+    """Yetki yoksa flash + False doner; route icinde kullanilir."""
+    role = session.get("role", "")
+    if not can_write_feed(role, feed):
+        flash("'{}' listesine yazma yetkiniz yok (rol: {}).".format(feed, role), "error")
+        return False
+    return True
+
 # ── Routes: Auth ──────────────────────────────────────────────────────────────
 @app.route("/", methods=["GET", "POST"])
 def login():
@@ -1096,6 +1895,9 @@ def add_ip():
         flash("Gecersiz feed.", "error")
         return redirect(url_for("dashboard"))
 
+    if not require_feed_write(feed):
+        return redirect(url_for("dashboard"))
+
     entries_to_add = [x.strip() for x in ip_raw.splitlines() if x.strip()]
     if not entries_to_add:
         flash("Deger bos birakilamaz.", "error")
@@ -1103,6 +1905,15 @@ def add_ip():
 
     current = set(read_feed(feed))
     added, skipped_invalid, skipped_dup, skipped_private = [], [], [], []
+    skipped_fortigate = []  # zaten bir FortiGate'te tanimli oldugu icin engellenenler
+    skipped_conflict = []   # karsi listede (black <-> allow) zaten var
+    opp = opposite_feed(feed)
+    opp_set = set(read_feed(opp)) if opp else set()
+
+    # FortiGate on-kontrolu: blacklist-ip'ye eklenmek istenen IP, tanimli
+    # FortiGate cihazlarindan HERHANGI birinde adres objesi/grubu olarak zaten
+    # varsa, HICBIR yere eklenmez (mukerrer/cakisan kayit onlenir).
+    fgt_devices_exist = feed == "blacklist-ip" and len(get_fortigate_devices(enabled_only=True)) > 0
 
     for raw in entries_to_add:
         ok, entry, reason = process_entry(feed, raw)
@@ -1115,6 +1926,25 @@ def add_ip():
         if entry in current:
             skipped_dup.append(entry)
             continue
+        if entry in opp_set:
+            skipped_conflict.append(entry)
+            continue
+        if fgt_devices_exist:
+            try:
+                blocked, hits = fortigate_check_before_blacklist(entry)
+            except Exception:
+                blocked, hits = False, []
+            if blocked:
+                detay = []
+                for h in hits:
+                    obj_names = ", ".join(o["name"] for o in h.get("objects", []))
+                    grp_names = ", ".join("{}(ref:{})".format(g["name"], g.get("q_ref", "?")) for g in h.get("groups", []))
+                    parca = "{}: obje [{}]".format(h["device"], obj_names)
+                    if grp_names:
+                        parca += ", grup [{}]".format(grp_names)
+                    detay.append(parca)
+                skipped_fortigate.append({"ip": entry, "detay": " | ".join(detay)})
+                continue
         current.add(entry)
         added.append(entry)
 
@@ -1135,6 +1965,21 @@ def add_ip():
                 flash("{} domain Umbrella'ya gonderildi.".format(u_ok), "success")
             if u_msg:
                 flash("Umbrella hatasi: {}".format(u_msg), "warning")
+        # Cloudflare otomatik sync (sadece blacklist-ip)
+        if feed == "blacklist-ip" and cloudflare_enabled() and get_setting("cloudflare_auto_sync") == "1":
+            c_ok, c_msg = 0, ""
+            for entry in added:
+                success, msg = cloudflare_add_ip(entry)
+                if success: c_ok += 1
+                else: c_msg = msg
+            if c_ok:
+                flash("{} IP Cloudflare listesine gonderildi.".format(c_ok), "success")
+            if c_msg:
+                flash("Cloudflare hatasi: {}".format(c_msg), "warning")
+        # Allowlist senkronu (Cloudflare allowlist + TippingPoint WhiteList)
+        a_oks, a_errs = sync_allowlist_add(feed, added)
+        for m in a_oks: flash(m, "success")
+        for m in a_errs: flash(m, "warning")
         # TippingPoint SMS otomatik sync (blacklist-ip, blacklist-domain, blacklist-url)
         tpt_itype = tippingpoint_feed_itype(feed)
         if tpt_itype and tippingpoint_enabled() and get_setting("tippingpoint_auto_sync") == "1":
@@ -1151,10 +1996,17 @@ def add_ip():
     if skipped_private:
         flash("{} private/ozel IP engellendi (eklenemez): {}".format(
             len(skipped_private), ", ".join(skipped_private[:5])), "error")
+    if skipped_fortigate:
+        for item in skipped_fortigate:
+            flash("'{}' eklenemedi — zaten FortiGate'te tanimli: {}".format(
+                item["ip"], item["detay"]), "error")
     if skipped_invalid:
         flash("{} gecersiz format atlandi.".format(len(skipped_invalid)), "warning")
     if skipped_dup:
         flash("{} duplicate atlandi.".format(len(skipped_dup)), "warning")
+    if skipped_conflict:
+        flash("{} kayit eklenemedi — {} listesinde zaten var (cakisma): {}".format(
+            len(skipped_conflict), opp, ", ".join(skipped_conflict[:5])), "error")
 
     return redirect(url_for("dashboard"))
 
@@ -1214,9 +2066,17 @@ def smart_add():
     per_feed_summary = []
     dup_total = 0
     umbrella_domains = []
+    cloudflare_ips = []
     tpt_new_by_feed = {}  # feed -> [entries] (blacklist-ip/domain/url icin)
+    conflict_entries = []
+    allow_new_by_feed = {}
     for feed, entries in buckets.items():
         current = set(read_feed(feed))
+        opp = opposite_feed(feed)
+        opp_set = set(read_feed(opp)) if opp else set()
+        conflicts = [e for e in entries if e in opp_set and e not in current]
+        conflict_entries.extend(conflicts)
+        entries = [e for e in entries if e not in opp_set]
         new_entries = [e for e in entries if e not in current]
         dup_total += len(entries) - len(new_entries)
         if new_entries:
@@ -1228,6 +2088,10 @@ def smart_add():
             per_feed_summary.append("{}: {}".format(feed, len(new_entries)))
             if feed == "blacklist-domain":
                 umbrella_domains.extend(new_entries)
+            if feed == "blacklist-ip":
+                cloudflare_ips.extend(new_entries)
+            if feed == "allowlist-ip":
+                allow_new_by_feed[feed] = new_entries
             if tippingpoint_feed_itype(feed):
                 tpt_new_by_feed[feed] = new_entries
 
@@ -1240,6 +2104,24 @@ def smart_add():
             if success: u_ok += 1
         if u_ok:
             flash("{} domain Umbrella'ya gonderildi.".format(u_ok), "success")
+
+    # Cloudflare otomatik sync
+    if cloudflare_ips and cloudflare_enabled() and get_setting("cloudflare_auto_sync") == "1":
+        c_ok = 0
+        for entry in cloudflare_ips:
+            success, _ = cloudflare_add_ip(entry)
+            if success: c_ok += 1
+        if c_ok:
+            flash("{} IP Cloudflare listesine gonderildi.".format(c_ok), "success")
+
+    # Allowlist senkronu
+    for f, ents in allow_new_by_feed.items():
+        a_oks, a_errs = sync_allowlist_add(f, ents)
+        for m in a_oks: flash(m, "success")
+        for m in a_errs: flash(m, "warning")
+    if conflict_entries:
+        flash("{} kayit karsi listede (kara/beyaz) zaten oldugu icin eklenmedi: {}".format(
+            len(conflict_entries), ", ".join(conflict_entries[:5])), "error")
 
     # TippingPoint SMS otomatik sync
     if tpt_new_by_feed and tippingpoint_enabled() and get_setting("tippingpoint_auto_sync") == "1":
@@ -1292,6 +2174,9 @@ def remove_ip():
         flash("Gecersiz istek.", "error")
         return redirect(url_for("dashboard"))
 
+    if not require_feed_write(feed):
+        return redirect(url_for("dashboard"))
+
     # feed turune gore normalize et (silmede private kontrolu yok, zaten listede)
     if feed in HASH_FEEDS:
         entry = normalize_hash(entry)
@@ -1319,6 +2204,19 @@ def remove_ip():
         else:
             flash("Umbrella'dan silinemedi: {}".format(msg), "warning")
 
+    # Cloudflare'dan da sil (blacklist-ip)
+    if feed == "blacklist-ip" and cloudflare_enabled() and get_setting("cloudflare_auto_sync") == "1":
+        success, msg = cloudflare_remove_ip(entry)
+        if success:
+            flash("IP Cloudflare listesinden de silindi.", "success")
+        else:
+            flash("Cloudflare'dan silinemedi: {}".format(msg), "warning")
+
+    # Allowlist: Cloudflare allowlist + TippingPoint WhiteList'ten de sil
+    a_oks, a_errs = sync_allowlist_remove(feed, entry)
+    for m in a_oks: flash(m, "success")
+    for m in a_errs: flash(m, "warning")
+
     # TippingPoint SMS'ten de sil
     tpt_itype = tippingpoint_feed_itype(feed)
     if tpt_itype and tippingpoint_enabled() and get_setting("tippingpoint_auto_sync") == "1":
@@ -1345,6 +2243,9 @@ def csv_import():
             flash("Gecersiz feed.", "error")
             return redirect(url_for("csv_import"))
 
+        if not require_feed_write(feed):
+            return redirect(url_for("csv_import"))
+
         # Dosya yukleme veya metin
         raw_text = ""
         uploaded = request.files.get("csv_file")
@@ -1360,6 +2261,9 @@ def csv_import():
         candidates = parse_csv_ips(raw_text)
         current    = set(read_feed(feed))
         added, skipped_invalid, skipped_dup, skipped_private = [], [], [], []
+        skipped_conflict = []
+        opp = opposite_feed(feed)
+        opp_set = set(read_feed(opp)) if opp else set()
 
         for raw in candidates:
             ok, entry, reason = process_entry(feed, raw)
@@ -1371,6 +2275,9 @@ def csv_import():
                 continue
             if entry in current:
                 skipped_dup.append(entry)
+                continue
+            if entry in opp_set:
+                skipped_conflict.append(entry)
                 continue
             current.add(entry)
             added.append(entry)
@@ -1386,6 +2293,9 @@ def csv_import():
             flash("{} gecersiz satir atlandi.".format(len(skipped_invalid)), "warning")
         if skipped_dup:
             flash("{} duplicate atlandi.".format(len(skipped_dup)), "warning")
+        if skipped_conflict:
+            flash("{} kayit {} listesinde zaten oldugu icin eklenmedi (cakisma).".format(
+                len(skipped_conflict), opp), "error")
 
         return redirect(url_for("dashboard"))
 
@@ -1435,7 +2345,7 @@ def users():
         if action == "add":
             password = request.form.get("password", "")
             role     = request.form.get("role", "operator")
-            if role not in ("admin", "operator"):
+            if role not in VALID_ROLES:
                 flash("Gecersiz rol.", "error")
             elif len(password) < 8:
                 flash("Sifre en az 8 karakter olmali.", "error")
@@ -1524,6 +2434,34 @@ def enrich():
                            itype=itype, active_sources=active_sources,
                            username=session["username"], role=session["role"])
 
+# ── Routes: FortiGate Envanter & Sorgu ────────────────────────────────────────
+@app.route("/fortigate", methods=["GET"])
+@login_required
+def fortigate():
+    devices = get_fortigate_devices(enabled_only=False)
+    return render_template("fortigate.html", devices=devices,
+                           username=session["username"], role=session["role"])
+
+@app.route("/fortigate/search", methods=["POST"])
+@login_required
+def fortigate_search():
+    """AJAX: IP'yi TUM aktif cihazlarda arar, JSON doner."""
+    validate_csrf()
+    ip = request.form.get("ip", "").strip()
+    if not ip:
+        return jsonify({"error": "IP bos"})
+    try:
+        import ipaddress as _ip
+        _ip.ip_address(ip)
+    except ValueError:
+        return jsonify({"error": "gecersiz IP formati"})
+
+    results = fortigate_search_ip_multi(ip)  # tum aktif cihazlar
+    log_action(session["username"], "FGT_SEARCH", "-", ip,
+               "FortiGate IP arama ({} cihaz)".format(len(results)), request.remote_addr)
+    return jsonify({"ip": ip, "results": results})
+
+
 # ── Routes: SIEM Settings ─────────────────────────────────────────────────────
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
@@ -1565,6 +2503,26 @@ def settings():
                            username=session["username"], role=session["role"],
                            log_path=LOG_PATH)
 
+# ── Routes: Roller & Yetkiler ────────────────────────────────────────────────
+ROLE_INFO = [
+    ("admin",          "Yonetici",          True,  True,  True),
+    ("operator",       "Operator (klasik)", True,  True,  False),
+    ("read-write",     "Okuma-Yazma",       True,  True,  False),
+    ("blacklist-only", "Sadece Blacklist",  True,  False, False),
+    ("allowlist-only", "Sadece Allowlist",  False, True,  False),
+    ("read-only",      "Salt Okuma",        False, False, False),
+]
+
+@app.route("/roles")
+@login_required
+@admin_required
+def roles():
+    db = get_db()
+    counts = {r["role"]: r["c"] for r in db.execute("SELECT role, COUNT(*) AS c FROM users GROUP BY role").fetchall()}
+    rows = [{"key": k, "name": n, "black": b, "allow": a, "admin": adm, "count": counts.get(k, 0)}
+            for k, n, b, a, adm in ROLE_INFO]
+    return render_template("roles.html", rows=rows, username=session["username"], role=session["role"])
+
 # ── Routes: Entegrasyonlar (Umbrella, TippingPoint) ───────────────────────────
 @app.route("/integrations", methods=["GET", "POST"])
 @login_required
@@ -1580,6 +2538,50 @@ def integrations():
                 set_setting(k, val)
             set_setting("urlscan_live", "1" if request.form.get("urlscan_live") else "0")
             flash("Threat Intel API ayarlari kaydedildi.", "success")
+
+        elif action == "fortigate_add":
+            name = sanitize_text(request.form.get("name", "").strip())
+            host = request.form.get("host", "").strip()
+            port = request.form.get("port", "").strip()
+            token = request.form.get("token", "").strip()
+            verify_ssl = 1 if request.form.get("verify_ssl") else 0
+            if not name or not host or not token:
+                flash("FortiGate cihaz adi, host ve token zorunlu.", "error")
+            else:
+                try:
+                    port = int(port) if port else 443
+                except ValueError:
+                    port = 443
+                db = get_db()
+                db.execute("""INSERT INTO fortigate_devices
+                              (name, host, port, method, username, password, token, verify_ssl, enabled, created_at)
+                              VALUES (?,?,?,?,?,?,?,?,1,?)""",
+                           (name, host, port, "api", "", "", token, verify_ssl,
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                db.commit()
+                log_action(session["username"], "FGT_ADD", "-", host, "FortiGate eklendi: " + name, request.remote_addr)
+                flash("FortiGate cihazi eklendi: {}".format(name), "success")
+
+        elif action == "fortigate_delete":
+            dev_id = request.form.get("device_id", "")
+            db = get_db()
+            db.execute("DELETE FROM fortigate_devices WHERE id = ?", (dev_id,))
+            db.commit()
+            log_action(session["username"], "FGT_DEL", "-", str(dev_id), "FortiGate silindi", request.remote_addr)
+            flash("FortiGate cihazi silindi.", "success")
+
+        elif action == "fortigate_test":
+            dev_id = request.form.get("device_id", "")
+            device = get_fortigate_device(dev_id)
+            if not device:
+                flash("Cihaz bulunamadi.", "error")
+            else:
+                inv = fortigate_inventory(device)
+                if inv.get("error"):
+                    flash("FortiGate baglanti hatasi ({}): {}".format(device["name"], inv["error"]), "error")
+                else:
+                    flash("FortiGate baglantisi basarili ({}): {} obje, {} grup okundu.".format(
+                        device["name"], len(inv["objects"]), len(inv["groups"])), "success")
 
         elif action == "save_umbrella":
             set_setting("umbrella_enabled",   "1" if request.form.get("umbrella_enabled") else "0")
@@ -1609,6 +2611,49 @@ def integrations():
                 if fail:
                     flash("{} domain gonderilemedi: {}".format(len(fail), ", ".join(fail[:5])), "warning")
 
+        elif action == "save_cloudflare":
+            set_setting("cloudflare_enabled",    "1" if request.form.get("cloudflare_enabled") else "0")
+            set_setting("cloudflare_account_id", request.form.get("cloudflare_account_id", "").strip())
+            token = request.form.get("cloudflare_token", "").strip()
+            if token:  # bos gelirse mevcut token korunur
+                set_setting("cloudflare_token", token)
+            set_setting("cloudflare_auto_sync",  "1" if request.form.get("cloudflare_auto_sync") else "0")
+            set_setting("cloudflare_allow_sync", "1" if request.form.get("cloudflare_allow_sync") else "0")
+            flash("Cloudflare ayarlari kaydedildi.", "success")
+
+        elif action == "cloudflare_test":
+            token      = get_setting("cloudflare_token")
+            account_id = get_setting("cloudflare_account_id")
+            if not token or not account_id:
+                flash("Cloudflare token veya Account ID eksik.", "error")
+            else:
+                try:
+                    list_id = cloudflare_get_or_create_list(token, account_id)
+                    if list_id:
+                        flash("Cloudflare baglantisi basarili. Liste hazir (ID: {}).".format(list_id), "success")
+                    else:
+                        flash("Baglanti kuruldu ama liste olusturulamadi.", "warning")
+                except Exception as e:
+                    flash("Cloudflare baglanti hatasi: {}".format(str(e)[:150]), "error")
+
+        elif action == "cloudflare_sync":
+            if not cloudflare_enabled():
+                flash("Cloudflare aktif degil veya token/Account ID yok.", "error")
+            else:
+                ok_count, fail = cloudflare_sync_all()
+                flash("{} IP Cloudflare listesine senkronize edildi.".format(ok_count), "success")
+                if fail:
+                    flash("Cloudflare sync hatasi: {}".format(", ".join(fail[:5])), "warning")
+
+        elif action == "cloudflare_allow_sync_now":
+            if not cloudflare_enabled():
+                flash("Cloudflare aktif degil veya token/Account ID yok.", "error")
+            else:
+                ok_count, fail = cloudflare_sync_all(allow=True)
+                flash("{} IP Cloudflare allowlist'e senkronize edildi.".format(ok_count), "success")
+                if fail:
+                    flash("Cloudflare allowlist sync hatasi: {}".format(", ".join(fail[:5])), "warning")
+
         elif action == "save_tippingpoint":
             set_setting("tippingpoint_enabled", "1" if request.form.get("tippingpoint_enabled") else "0")
             set_setting("tippingpoint_server", sanitize_text(request.form.get("tippingpoint_server", "").strip(), 255))
@@ -1619,6 +2664,8 @@ def integrations():
             set_setting("tippingpoint_tag_value", sanitize_text(request.form.get("tippingpoint_tag_value", "").strip(), 100))
             set_setting("tippingpoint_skip_ssl_verify", "1" if request.form.get("tippingpoint_skip_ssl_verify") else "0")
             set_setting("tippingpoint_auto_sync", "1" if request.form.get("tippingpoint_auto_sync") else "0")
+            set_setting("tippingpoint_allow_tag_category", sanitize_text(request.form.get("tippingpoint_allow_tag_category", "WhiteList").strip() or "WhiteList", 100))
+            set_setting("tippingpoint_allow_sync", "1" if request.form.get("tippingpoint_allow_sync") else "0")
             flash("TippingPoint SMS ayarlari kaydedildi.", "success")
 
         elif action == "tippingpoint_test":
@@ -1637,8 +2684,64 @@ def integrations():
                 if fail:
                     flash("{} kayit gonderilemedi: {}".format(len(fail), ", ".join(fail[:5])), "warning")
 
+        elif action == "save_brandefense":
+            set_setting("brandefense_enabled", "1" if request.form.get("brandefense_enabled") else "0")
+            tok = request.form.get("brandefense_token", "").strip()
+            if tok:  # bos gelirse mevcut token korunur
+                set_setting("brandefense_token", tok)
+            valid_t = {k for k, _ in BRANDEFENSE_TARGETS}
+            set_setting("brandefense_targets", ",".join(t for t in request.form.getlist("brandefense_targets") if t in valid_t))
+            try:
+                hrs = max(0, min(168, int(request.form.get("brandefense_interval_hours", "24") or 0)))
+            except ValueError:
+                hrs = 24
+            set_setting("brandefense_interval_hours", str(hrs))
+            log_action(session["username"], "SETTINGS", "brandefense", "-", "Brandefense ayarlari guncellendi", request.remote_addr)
+            flash("Brandefense ayarlari kaydedildi.", "success")
+
+        elif action == "brandefense_test":
+            try:
+                ips, invalid = brandefense_fetch_ips()
+                sample = ", ".join("{} ({})".format(k, v) for k, v in list(ips.items())[:5])
+                flash("Brandefense baglantisi basarili: {} IP alindi. Ornek: {}".format(len(ips), sample or "-"), "success")
+                if invalid:
+                    flash("{} gecersiz kayit atlandi.".format(len(invalid)), "warning")
+            except Exception as e:
+                flash("Brandefense baglanti hatasi: {}".format(str(e)[:150]), "error")
+
+        elif action == "brandefense_sync_now":
+            if not brandefense_enabled():
+                flash("Brandefense aktif degil veya token yok.", "error")
+            elif not get_setting("brandefense_targets"):
+                flash("En az bir hedef liste secin.", "error")
+            else:
+                try:
+                    r = brandefense_sync(full=True, actor=session["username"])
+                    flash("Brandefense senkronu: {} IP cekildi, {} yeni, {} cikan -> {}".format(
+                        r["fetched"], r["new"], r["removed"], ", ".join(r["targets"])), "success")
+                    if r["conflicts"]:
+                        flash("{} IP blacklist-ip'de oldugu icin allowlist'e basilmadi: {}".format(
+                            len(r["conflicts"]), ", ".join(r["conflicts"][:5])), "error")
+                    for m in r["errors"][:5]:
+                        flash(m, "warning")
+                except Exception as e:
+                    flash("Brandefense senkron hatasi: {}".format(str(e)[:150]), "error")
+
+        elif action == "tippingpoint_allow_sync_now":
+            if not tippingpoint_enabled():
+                flash("TippingPoint aktif degil veya sunucu/API key eksik.", "error")
+            else:
+                ok_count, fail = tippingpoint_allow_sync_all()
+                flash("{} IP TippingPoint WhiteList'e senkronize edildi.".format(ok_count), "success")
+                if fail:
+                    flash("{} kayit gonderilemedi: {}".format(len(fail), ", ".join(fail[:5])), "warning")
+
     cfg = get_all_settings()
     return render_template("integrations.html", cfg=cfg,
+                           bd_targets=BRANDEFENSE_TARGETS,
+                           bd_selected=[t for t in cfg.get("brandefense_targets", "").split(",") if t],
+                           bd_managed_count=len(json.loads(cfg.get("brandefense_managed") or "[]")),
+                           fortigate_devices=get_fortigate_devices(enabled_only=False),
                            username=session["username"], role=session["role"])
 
 # ── Routes: Sistem Izleme ──────────────────────────────────────────────────────
@@ -1721,6 +2824,8 @@ def monitor():
 
 if __name__ == "__main__":
     init_db()
+    start_background_jobs()
     app.run(host="0.0.0.0", port=5000, debug=False)
 
 init_db()
+start_background_jobs()

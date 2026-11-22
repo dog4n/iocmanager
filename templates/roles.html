@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Roles &amp; Permissions — IoCManager{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Roles &amp; Permissions</h1>
+  <p>Sistemdeki roller ve yetkileri. Kullanicilara rol atamasi <a href="{{ url_for('users') }}" style="color:var(--accent);">Users</a> sayfasindan yapilir.</p>
+</div>
+<div class="card">
+  <div class="card-body" style="padding:0;">
+    <table>
+      <thead><tr>
+        <th>Rol</th><th>Aciklama</th>
+        <th style="text-align:center;">Goruntuleme / Queries / Object Control</th>
+        <th style="text-align:center;">Blacklist Yazma</th>
+        <th style="text-align:center;">Allowlist Yazma</th>
+        <th style="text-align:center;">Management / Monitoring / Audit</th>
+        <th style="text-align:center;">Kullanici</th>
+      </tr></thead>
+      <tbody>
+      {% for r in rows %}
+      <tr>
+        <td class="mono" style="font-weight:600;">{{ r.key }}</td>
+        <td>{{ r.name }}</td>
+        <td style="text-align:center;"><span class="tag tag-allow">&#10003;</span></td>
+        <td style="text-align:center;">{% if r.black %}<span class="tag tag-allow">&#10003;</span>{% else %}<span class="tag tag-block">&#10007;</span>{% endif %}</td>
+        <td style="text-align:center;">{% if r.allow %}<span class="tag tag-allow">&#10003;</span>{% else %}<span class="tag tag-block">&#10007;</span>{% endif %}</td>
+        <td style="text-align:center;">{% if r.admin %}<span class="tag tag-allow">&#10003;</span>{% else %}<span class="tag tag-block">&#10007;</span>{% endif %}</td>
+        <td style="text-align:center;" class="mono">{{ r.count }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<p style="font-size:12px; color:var(--text-muted); margin-top:12px;">Yazma yetkisi her islemde besleme bazinda kontrol edilir. Hash beslemesi yalnizca blacklist'tir.</p>
+{% endblock %}

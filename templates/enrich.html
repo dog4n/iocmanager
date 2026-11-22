@@ -88,6 +88,7 @@
       <div><div class="stat-label">Ulke</div><div style="font-size:15px;">{{ r.country }}</div></div>
       <div><div class="stat-label">ISP</div><div style="font-size:13px;">{{ r.isp }}</div></div>
       <div><div class="stat-label">Kullanim</div><div style="font-size:13px;">{{ r.usage }}</div></div>
+      <div><div class="stat-label">Domain Name</div><div class="mono" style="font-size:13px; word-break:break-all;">{{ r.domain if r.domain else '-' }}</div></div>
 
       {% elif r.source == 'URLScan' %}
       {% if r.score is defined and r.score %}<div><div class="stat-label">URLScan Skoru</div><div style="color:{{ '#ff7b72' if r.score else '#56d364' }}; font-size:20px; font-weight:700;">{{ r.score }}</div></div>{% endif %}

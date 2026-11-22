@@ -4,11 +4,128 @@
 
 <div class="page-header">
   <h1>Entegrasyonlar</h1>
-  <p>Blacklist kayitlarini dis sistemlere otomatik yansitan entegrasyonlar</p>
+  <p>IoC listelerini dis sistemlere yansitan ve dis kaynaklardan besleyen entegrasyonlar</p>
 </div>
 
+<style>
+  .igrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:14px; margin-bottom:22px; }
+  .itile { text-align:left; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px; cursor:pointer;
+           color:var(--text); font-family:inherit; transition:all .15s; }
+  .itile:hover { border-color:var(--accent); transform:translateY(-1px); }
+  .itile.sel { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; background:rgba(227,98,9,.06); }
+  .it-top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+  .it-name { font-weight:700; font-size:15px; color:var(--text-head); }
+  .it-desc { font-size:12px; color:var(--text-muted); line-height:1.45; }
+  .st { font-size:10.5px; font-weight:700; padding:3px 9px; border-radius:10px; background:rgba(255,255,255,.06); color:var(--text-muted); white-space:nowrap; }
+  .st.on { background:rgba(35,134,54,.15); color:#56d364; border:1px solid #238636; }
+  .ipanel { display:none; }
+  .ihint { font-size:13px; color:var(--text-muted); padding:30px; text-align:center; border:1px dashed var(--border); border-radius:12px; }
+</style>
+{% macro st(v) %}{% if v == '1' %}<span class="st on">Aktif</span>{% else %}<span class="st">Pasif</span>{% endif %}{% endmacro %}
+<div class="igrid">
+  <button type="button" class="itile" data-p="p-fortigate">
+    <div class="it-top"><span class="it-name">FortiGate</span>{% if fortigate_devices|length %}<span class="st on">{{ fortigate_devices|length }} cihaz</span>{% else %}<span class="st">Cihaz yok</span>{% endif %}</div>
+    <div class="it-desc">Firewall obje kontrolu · coklu cihaz</div>
+  </button>
+  <button type="button" class="itile" data-p="p-ti">
+    <div class="it-top"><span class="it-name">Threat Intel</span>{% set n = [cfg.api_virustotal, cfg.api_abuseipdb, cfg.api_urlscan, cfg.api_shodan, cfg.api_mxtoolbox]|select|list|length %}<span class="st {{ 'on' if n }}">{{ n }}/5 kaynak</span></div>
+    <div class="it-desc">VirusTotal · AbuseIPDB · URLScan · Shodan · MXToolbox</div>
+  </button>
+  <button type="button" class="itile" data-p="p-umbrella">
+    <div class="it-top"><span class="it-name">Cisco Umbrella</span>{{ st(cfg.umbrella_enabled) }}</div>
+    <div class="it-desc">blacklist-domain → Destination List</div>
+  </button>
+  <button type="button" class="itile" data-p="p-cloudflare">
+    <div class="it-top"><span class="it-name">Cloudflare</span>{{ st(cfg.cloudflare_enabled) }}</div>
+    <div class="it-desc">IP List · blacklist / allowlist</div>
+  </button>
+  <button type="button" class="itile" data-p="p-tippingpoint">
+    <div class="it-top"><span class="it-name">TippingPoint SMS</span>{{ st(cfg.tippingpoint_enabled) }}</div>
+    <div class="it-desc">Reputation DB · BlackList / WhiteList</div>
+  </button>
+  <button type="button" class="itile" data-p="p-brandefense">
+    <div class="it-top"><span class="it-name">Brandefense EASM</span>{{ st(cfg.brandefense_enabled) }}</div>
+    <div class="it-desc">Tarama IP'leri → allowlist hedefleri</div>
+  </button>
+</div>
+<div class="ihint" id="ihint">Yapilandirmak icin bir entegrasyon secin.</div>
+
+<section class="ipanel" id="p-fortigate">
+<!-- FortiGate Cihazlari -->
+<div class="card">
+  <div class="card-header"><div class="card-title">&#128737; FortiGate Cihazlari</div></div>
+  <div class="card-body">
+    <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
+      REST API ile baglanir. IP sorgusu (Sorgu &rarr; FortiGate) ve blacklist ekleme
+      korumasi bu cihazlar uzerinden calisir.
+    </p>
+
+    {% if fortigate_devices %}
+    <table style="width:100%; font-size:13px; margin-bottom:16px;">
+      <thead>
+        <tr style="text-align:left; color:var(--text-muted); font-size:12px;">
+          <th style="padding:8px;">Ad</th><th style="padding:8px;">Host</th><th style="padding:8px;">Durum</th><th style="padding:8px;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in fortigate_devices %}
+        <tr style="border-top:1px solid var(--border);">
+          <td style="padding:8px; color:var(--text-head); font-weight:600;">{{ d.name }}</td>
+          <td style="padding:8px; font-family:monospace; color:var(--text-muted);">{{ d.host }}:{{ d.port }}</td>
+          <td style="padding:8px;">{% if d.enabled %}<span style="color:#56d364;">&#9679; aktif</span>{% else %}<span style="color:var(--text-muted);">pasif</span>{% endif %}</td>
+          <td style="padding:8px; text-align:right; white-space:nowrap;">
+            <form method="POST" style="display:inline;">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="action" value="fortigate_test">
+              <input type="hidden" name="device_id" value="{{ d.id }}">
+              <button type="submit" class="btn btn-sm btn-secondary">Baglanti Testi</button>
+            </form>
+            <form method="POST" style="display:inline;" onsubmit="return confirm('{{ d.name }} silinsin mi?')">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="action" value="fortigate_delete">
+              <input type="hidden" name="device_id" value="{{ d.id }}">
+              <button type="submit" class="btn btn-sm" style="color:var(--danger); border-color:rgba(218,54,51,.3);">Sil</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">Henuz cihaz eklenmemis.</p>
+    {% endif %}
+
+    <div style="padding:10px 12px; border-left:3px solid var(--accent); background:rgba(227,98,9,.05); font-size:12px; color:var(--text-muted); margin-bottom:14px;">
+      <strong style="color:var(--text-head);">API Token:</strong>
+      FortiGate &rarr; System &rarr; Administrators &rarr; Create New &rarr; REST API Admin
+      (read-only profil, firewall address/addrgrp okuma izni yeterli).
+    </div>
+
+    <form method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="fortigate_add">
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+        <div class="form-group"><label>Cihaz Adi</label>
+          <input type="text" name="name" required placeholder="FGT-Merkez"></div>
+        <div class="form-group"><label>Host (IP/hostname)</label>
+          <input type="text" name="host" required placeholder="10.0.0.1"></div>
+        <div class="form-group"><label>HTTPS Port</label>
+          <input type="text" name="port" placeholder="443"></div>
+        <div class="form-group"><label>API Token</label>
+          <input type="text" name="token" required placeholder="REST API access token"></div>
+      </div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; margin:8px 0;">
+        <input type="checkbox" name="verify_ssl" value="1" style="width:auto; margin:0;"> SSL sertifikasini dogrula (self-signed ise isaretleme)
+      </label>
+      <button type="submit" class="btn btn-primary">FortiGate Cihazi Ekle</button>
+    </form>
+  </div>
+</div>
+</section>
+
+<section class="ipanel" id="p-ti">
 <!-- Threat Intel API -->
-<div class="card" style="margin-bottom:20px;">
+<div class="card">
   <div class="card-header"><div class="card-title">Threat Intel API Anahtarlari</div></div>
   <div class="card-body">
     <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
@@ -40,7 +157,9 @@
     </form>
   </div>
 </div>
+</section>
 
+<section class="ipanel" id="p-umbrella">
 <!-- Cisco Umbrella Management API -->
 <div class="card">
   <div class="card-header"><div class="card-title">Cisco Umbrella Entegrasyonu</div></div>
@@ -93,9 +212,80 @@
     </div>
   </div>
 </div>
+</section>
 
+<section class="ipanel" id="p-cloudflare">
+<!-- Cloudflare Rules Lists (IP) -->
+<div class="card">
+  <div class="card-header"><div class="card-title">&#9729; Cloudflare Entegrasyonu</div></div>
+  <div class="card-body">
+    <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
+      blacklist-ip listesindeki IP'ler, IoCManager'in Cloudflare hesabinizda otomatik olusturdugu
+      "<span class="mono">iocmanager_blacklist</span>" IP listesine (kind: ip) yazilir. API Token gereklidir
+      (izin: <b>Account &rarr; Account Filter Lists &rarr; Edit</b>). Otomatik sync acikken her
+      blacklist-ip ekleme/silme aninda Cloudflare listesine yansir. Listeyi bir Firewall/WAF kuralinda
+      <span class="mono">$iocmanager_blacklist</span> olarak kullanabilirsiniz.
+    </p>
+    <form method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="save_cloudflare">
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+          <input type="checkbox" name="cloudflare_enabled" value="1" {{ 'checked' if cfg.cloudflare_enabled == '1' }} style="width:auto; margin:0;">
+          Cloudflare Entegrasyonu Aktif
+        </label>
+      </div>
+      <div class="grid-2" style="gap:16px;">
+        <div class="form-group"><label>Account ID</label>
+          <input type="text" name="cloudflare_account_id" value="{{ cfg.cloudflare_account_id }}" placeholder="Cloudflare Account ID"></div>
+        <div class="form-group"><label>API Token</label>
+          <input type="password" name="cloudflare_token" placeholder="{{ '******** (kayitli)' if cfg.cloudflare_token else 'API Token' }}"></div>
+      </div>
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+          <input type="checkbox" name="cloudflare_auto_sync" value="1" {{ 'checked' if cfg.cloudflare_auto_sync == '1' }} style="width:auto; margin:0;">
+          Otomatik Sync (her blacklist-ip ekleme/silmede Cloudflare'a yansit)
+        </label>
+      </div>
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+          <input type="checkbox" name="cloudflare_allow_sync" value="1" {{ 'checked' if cfg.cloudflare_allow_sync == '1' }} style="width:auto; margin:0;">
+          Allowlist Sync (allowlist-ip &rarr; <span class="mono">iocmanager_allowlist</span>; WAF'ta <b>Skip</b> kuralinda kullanin)
+        </label>
+      </div>
+      {% if cfg.cloudflare_list_id %}
+      <div style="font-size:11px; color:var(--text-muted); margin-bottom:12px;">
+        Aktif Liste ID: <span class="mono">{{ cfg.cloudflare_list_id }}</span>
+        {% if cfg.cloudflare_allow_list_id %} &middot; Allowlist ID: <span class="mono">{{ cfg.cloudflare_allow_list_id }}</span>{% endif %}
+      </div>
+      {% endif %}
+      <button type="submit" class="btn btn-primary">Cloudflare Ayarlarini Kaydet</button>
+    </form>
+
+    <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border); display:flex; gap:10px; align-items:center;">
+      <form method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="cloudflare_test">
+        <button type="submit" class="btn btn-secondary">Baglanti Testi</button>
+      </form>
+      <form method="POST" style="display:inline;" onsubmit="return confirm('Tum blacklist IP listesi Cloudflare listesiyle DEGISTIRILECEK (PUT). Devam?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="cloudflare_sync">
+        <button type="submit" class="btn btn-secondary">Cloudflare'a Senkronize Et</button>
+      </form>
+      <form method="POST" style="display:inline;" onsubmit="return confirm('Tum allowlist IP listesi Cloudflare allowlist ile DEGISTIRILECEK (PUT). Devam?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="cloudflare_allow_sync_now">
+        <button type="submit" class="btn btn-secondary">Allowlist Senkronize Et</button>
+      </form>
+    </div>
+  </div>
+</div>
+</section>
+
+<section class="ipanel" id="p-tippingpoint">
 <!-- Trend Micro TippingPoint SMS -->
-<div class="card" style="margin-top:20px;">
+<div class="card">
   <div class="card-header"><div class="card-title">Trend Micro TippingPoint SMS Entegrasyonu</div></div>
   <div class="card-body">
     <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
@@ -139,6 +329,16 @@
           Otomatik Sync (her blacklist ip/domain/url ekleme-silmede SMS'e yansit)
         </label>
       </div>
+      <div class="grid-2" style="gap:16px;">
+        <div class="form-group"><label>Allowlist Tag Kategorisi</label>
+          <input type="text" name="tippingpoint_allow_tag_category" value="{{ cfg.tippingpoint_allow_tag_category or 'WhiteList' }}" placeholder="WhiteList"></div>
+        <div class="form-group" style="display:flex; align-items:flex-end;">
+          <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+            <input type="checkbox" name="tippingpoint_allow_sync" value="1" {{ 'checked' if cfg.tippingpoint_allow_sync == '1' }} style="width:auto; margin:0;">
+            Allowlist Sync (allowlist-ip &rarr; <span class="mono">WhiteList,IP</span>)
+          </label>
+        </div>
+      </div>
       <button type="submit" class="btn btn-primary">TippingPoint Ayarlarini Kaydet</button>
     </form>
 
@@ -148,13 +348,99 @@
         <input type="hidden" name="action" value="tippingpoint_test">
         <button type="submit" class="btn btn-secondary">Baglanti Testi</button>
       </form>
-      <form method="POST" style="display:inline;" onsubmit="return confirm('Tum blacklist IP/domain/URL kayitlari TippingPoint SMS\\'e gonderilecek. Devam?')">
+      <form method="POST" style="display:inline;" onsubmit="return confirm('Tum blacklist IP/domain/URL kayitlari TippingPoint SMS\'e gonderilecek. Devam?')">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="action" value="tippingpoint_sync">
         <button type="submit" class="btn btn-secondary">TippingPoint'e Senkronize Et</button>
       </form>
+      <form method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="tippingpoint_allow_sync_now">
+        <button type="submit" class="btn btn-secondary">WhiteList Senkronize Et</button>
+      </form>
     </div>
   </div>
 </div>
+</section>
+
+<section class="ipanel" id="p-brandefense">
+<!-- Brandefense EASM -->
+<div class="card">
+  <div class="card-header"><div class="card-title">Brandefense EASM — Tarama IP'leri</div></div>
+  <div class="card-body">
+    <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
+      Brandefense'in EASM taramalarini yaptigi kaynak IP'ler cekilir ve asagida secilen allowlist hedeflerine basilir;
+      boylece taramalar firewall / IPS / WAF'a takilmaz. Brandefense listesinden cikan IP'ler hedeflerden de silinir,
+      elle eklenmis kayitlara dokunulmaz. blacklist-ip'de olan bir IP allowlist'e basilmaz (cakisma olarak raporlanir).
+      Token yetkisi: <b>EASM Read</b>.
+    </p>
+    <form method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="save_brandefense">
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+          <input type="checkbox" name="brandefense_enabled" value="1" {{ 'checked' if cfg.brandefense_enabled == '1' }} style="width:auto; margin:0;">
+          Brandefense Entegrasyonu Aktif
+        </label>
+      </div>
+      <div class="grid-2" style="gap:16px;">
+        <div class="form-group"><label>API Token</label>
+          <input type="password" name="brandefense_token" placeholder="{{ '******** (kayitli)' if cfg.brandefense_token else 'Bearer token' }}"></div>
+        <div class="form-group"><label>Otomatik Senkron Araligi (saat, 0 = sadece manuel)</label>
+          <input type="number" name="brandefense_interval_hours" min="0" max="168" value="{{ cfg.brandefense_interval_hours or 24 }}"></div>
+      </div>
+      <div class="form-group">
+        <label>Hedef Listeler</label>
+        <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
+          {% for key, label in bd_targets %}
+          <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-weight:400;">
+            <input type="checkbox" name="brandefense_targets" value="{{ key }}" {{ 'checked' if key in bd_selected }} style="width:auto; margin:0;">
+            {{ label }}
+            {% if key == 'cloudflare' and cfg.cloudflare_enabled != '1' %}<span class="small" style="color:#d29922;">(Cloudflare entegrasyonu pasif)</span>{% endif %}
+            {% if key == 'tippingpoint' and cfg.tippingpoint_enabled != '1' %}<span class="small" style="color:#d29922;">(TippingPoint entegrasyonu pasif)</span>{% endif %}
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      <div style="font-size:11px; color:var(--text-muted); margin-bottom:12px;">
+        Son senkron: <span class="mono">{{ cfg.brandefense_last_sync or '-' }}</span>
+        {% if cfg.brandefense_last_result %} &middot; {{ cfg.brandefense_last_result }}{% endif %}
+        &middot; Yonetilen IP: <span class="mono">{{ bd_managed_count }}</span>
+      </div>
+      <button type="submit" class="btn btn-primary">Brandefense Ayarlarini Kaydet</button>
+    </form>
+
+    <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border); display:flex; gap:10px; align-items:center;">
+      <form method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="brandefense_test">
+        <button type="submit" class="btn btn-secondary">Baglanti Testi</button>
+      </form>
+      <form method="POST" style="display:inline;" onsubmit="return confirm('Brandefense IP listesi secili hedeflere gonderilecek. Devam?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="brandefense_sync_now">
+        <button type="submit" class="btn btn-secondary">Simdi Senkronize Et</button>
+      </form>
+    </div>
+  </div>
+</div>
+</section>
+
+<script>
+(function(){
+  var tiles=document.querySelectorAll('.itile'), panels=document.querySelectorAll('.ipanel'), hint=document.getElementById('ihint');
+  function show(id){
+    var any=false;
+    panels.forEach(function(p){ var on=(p.id===id); p.style.display=on?'block':'none'; if(on) any=true; });
+    tiles.forEach(function(t){ t.classList.toggle('sel', t.dataset.p===id); });
+    hint.style.display=any?'none':'block';
+  }
+  tiles.forEach(function(t){ t.addEventListener('click', function(){
+    show(t.dataset.p); history.replaceState(null,'','#'+t.dataset.p);
+  }); });
+  panels.forEach(function(p){ p.querySelectorAll('form').forEach(function(f){ if(!f.getAttribute('action')) f.setAttribute('action','#'+p.id); }); });
+  var h=location.hash.slice(1); show(document.getElementById(h)?h:'');
+})();
+</script>
 
 {% endblock %}

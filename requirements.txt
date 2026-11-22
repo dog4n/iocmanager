@@ -1,3 +1,2 @@
-# Ortak bagimliliklar (her iki platformda da gerekli)
 flask==3.0.3
 waitress==3.0.0

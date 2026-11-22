@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Object Control — IoCManager{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Object Control</h1>
+  <p>Bir IP'nin tanimli FortiGate cihazlarinda hangi obje/grupta ekli oldugunu bulun</p>
+</div>
+
+<div class="card" style="margin-bottom:24px;">
+  <div class="card-header"><strong>&#128269; IP Arama</strong>
+    <span style="font-size:12px; color:var(--text-muted); margin-left:8px;">tum aktif cihazlarda canli sorgular</span>
+  </div>
+  <div class="card-body">
+    <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap;">
+      <div class="form-group" style="margin:0; flex:1; min-width:220px;">
+        <label>IP Adresi</label>
+        <input type="text" id="searchIp" placeholder="34.16.143.68" autocomplete="off" autofocus>
+      </div>
+      <button class="btn btn-primary" onclick="searchIp()">Ara</button>
+    </div>
+    {% if not devices %}
+    <p style="margin-top:12px; font-size:13px; color:var(--text-muted);">
+      Henuz FortiGate cihazi eklenmemis. <a href="{{ url_for('integrations') }}" style="color:var(--accent);">Entegrasyonlar</a> sayfasindan ekleyin.
+    </p>
+    {% endif %}
+    <div id="searchResult" style="margin-top:18px;"></div>
+  </div>
+</div>
+
+{% if devices %}
+<div class="card">
+  <div class="card-header"><strong>Sorgulanan Cihazlar</strong>
+    <span style="font-size:12px; color:var(--text-muted); margin-left:8px;">yonetim icin Entegrasyonlar sayfasi</span>
+  </div>
+  <div class="card-body" style="padding:0;">
+    <table style="width:100%; font-size:13px;">
+      <tbody>
+        {% for d in devices %}
+        <tr style="border-top:1px solid var(--border);">
+          <td style="padding:10px 16px; color:var(--text-head); font-weight:600;">{{ d.name }}</td>
+          <td style="padding:10px 16px; font-family:monospace; color:var(--text-muted);">{{ d.host }}:{{ d.port }}</td>
+          <td style="padding:10px 16px;">{% if d.enabled %}<span style="color:#56d364;">&#9679; aktif</span>{% else %}<span style="color:var(--text-muted);">pasif</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<script>
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+  });
+}
+function searchIp() {
+  var ip = document.getElementById('searchIp').value.trim();
+  var res = document.getElementById('searchResult');
+  if (!ip) { res.innerHTML = '<p style="color:var(--danger); font-size:13px;">IP girin.</p>'; return; }
+  var params = new URLSearchParams();
+  params.append('ip', ip);
+  params.append('csrf_token', '{{ csrf_token }}');
+  res.innerHTML = '<p style="font-size:13px; color:var(--text-muted);">Tum cihazlarda araniyor...</p>';
+  fetch('{{ url_for("fortigate_search") }}', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: params.toString()
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (d.error) { res.innerHTML = '<p style="color:var(--danger); font-size:13px;">Hata: ' + esc(d.error) + '</p>'; return; }
+    var html = '<div style="font-size:13px; margin-bottom:10px;">Sonuc: <strong>' + esc(d.ip) + '</strong></div>';
+    var anyFound = false;
+    d.results.forEach(function(r){
+      html += '<div style="border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:10px;">';
+      html += '<div style="font-weight:600; color:var(--text-head); margin-bottom:8px;">' + esc(r.device) + '</div>';
+      if (r.error) {
+        html += '<div style="color:var(--danger); font-size:12px;">Hata: ' + esc(r.error) + '</div>';
+      } else if (!r.found) {
+        html += '<div style="color:var(--text-muted); font-size:12px;">Bu cihazda bulunamadi. (' + r.total_objects + ' obje, ' + r.total_groups + ' grup tarandi)</div>';
+      } else {
+        anyFound = true;
+        r.objects.forEach(function(o){
+          var refBadge = '';
+          if (o.q_ref === 0) {
+            refBadge = '<span style="background:rgba(218,54,51,.15); color:#f85149; border:1px solid rgba(218,54,51,.4); border-radius:4px; padding:1px 6px; font-size:11px; margin-left:8px;">ref: 0 — OLU KAYIT (policy kullanmiyor!)</span>';
+          } else if (o.q_ref != null) {
+            refBadge = '<span style="background:rgba(35,134,54,.15); color:#56d364; border:1px solid #238636; border-radius:4px; padding:1px 6px; font-size:11px; margin-left:8px;">ref: ' + o.q_ref + '</span>';
+          }
+          html += '<div style="margin-bottom:6px;"><span style="color:var(--accent); font-weight:600;">&#128205; Obje: ' + esc(o.name) + '</span>' + refBadge
+                + '<div style="font-size:11px; color:var(--text-muted); font-family:monospace;">' + esc(o.type) + ' · ' + esc(o.value) + (o.comment ? ' · ' + esc(o.comment) : '') + '</div></div>';
+        });
+        if (r.groups.length) {
+          r.groups.forEach(function(g){
+            var refBadge = '';
+            if (g.q_ref === 0) {
+              refBadge = '<span style="background:rgba(218,54,51,.15); color:#f85149; border:1px solid rgba(218,54,51,.4); border-radius:4px; padding:1px 6px; font-size:11px; margin-left:8px;">ref: 0 — OLU GRUP</span>';
+            } else if (g.q_ref != null) {
+              refBadge = '<span style="background:rgba(35,134,54,.15); color:#56d364; border:1px solid #238636; border-radius:4px; padding:1px 6px; font-size:11px; margin-left:8px;">ref: ' + g.q_ref + '</span>';
+            }
+            html += '<div style="margin-bottom:4px; padding-left:12px;"><span style="color:#e3b341;">&#128193; Grup: ' + esc(g.name) + '</span>' + refBadge
+                  + '<span style="font-size:11px; color:var(--text-muted); margin-left:6px;">(' + esc(g.via_object) + ' uzerinden)</span></div>';
+          });
+        }
+      }
+      html += '</div>';
+    });
+    if (!anyFound && d.results.length && d.results.every(function(r){ return !r.error; })) {
+      html += '<div style="background:rgba(35,134,54,.08); border:1px solid #238636; border-radius:6px; padding:10px; font-size:13px; color:#56d364;">Bu IP hicbir FortiGate\'te tanimli degil.</div>';
+    }
+    res.innerHTML = html;
+  })
+  .catch(function(e){ res.innerHTML = '<p style="color:var(--danger); font-size:13px;">Baglanti hatasi: ' + esc(e) + '</p>'; });
+}
+document.getElementById('searchIp').addEventListener('keypress', function(e){
+  if (e.key === 'Enter') searchIp();
+});
+</script>
+{% endblock %}
